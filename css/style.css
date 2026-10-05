@@ -232,3 +232,11 @@ body.training main { padding-bottom: 16px; }
 .mbar i { display: block; height: 100%; border-radius: 99px; }
 .macro-mini { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: .9rem; }
 #go-body { cursor: pointer; }
+.meal { border-top: 1px solid var(--line); padding: 10px 0 4px; }
+.meal:first-of-type { border-top: 0; }
+.meal-item { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; }
+.meal-item b { min-width: 56px; text-align: right; }
+.meal-item .muted { min-width: 64px; }
+.meal.done > .row b.grow { opacity: .85; }
+.meal .presets { margin-top: 6px; }
+.btn.small { padding: 6px 10px; font-size: .85rem; }

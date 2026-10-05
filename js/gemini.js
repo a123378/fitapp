@@ -319,3 +319,38 @@ ${cues}
 ${slotText}`;
   return callGemini(prompt, splitSchema);
 }
+
+// ---------- 飲食菜單 ----------
+const mealSchema = {
+  type: 'OBJECT',
+  properties: {
+    meals: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          name: { type: 'STRING' },
+          items: { type: 'ARRAY', items: { type: 'OBJECT', properties: { food: { type: 'STRING' }, grams: { type: 'NUMBER' } }, required: ['food', 'grams'] } },
+          tip: { type: 'STRING' }
+        },
+        required: ['name', 'items']
+      }
+    },
+    tips: { type: 'ARRAY', items: { type: 'STRING' } }
+  },
+  required: ['meals']
+};
+
+export async function generateMealPlan({ target, macros, goalLabel, mealCount, prefs, trainingToday, foods }) {
+  const prompt = `你是運動營養師，幫一位做重訓的台灣使用者排「今天一整天」的飲食菜單。用繁體中文。
+目標：${goalLabel}；今天熱量 ${target} kcal，蛋白質 ${macros.protein} g、脂肪 ${macros.fat} g、碳水 ${macros.carb} g。
+餐數：${mealCount === 4 ? '早餐、午餐、點心、晚餐' : '早餐、午餐、晚餐'}。
+${trainingToday ? '今天有訓練：訓練前後那餐多放一點碳水和蛋白質。' : '今天沒有訓練。'}
+使用者的偏好或限制：${prefs || '無'}（不吃的東西一定不能出現）。
+規則：
+- 食物只能從這份清單挑，名稱要一字不差：${foods.join('、')}
+- 每餐 2-4 樣，要像台灣人真的會吃的組合（例如早餐蛋 + 吐司 + 豆漿、午晚餐便當式的飯 + 肉 + 菜），不要一天都同一種肉。
+- grams 是煮熟後的重量（燕麥片是乾重）。總量盡量接近上面的三大營養素，程式會再微調份量。
+- 每餐可以給一句 tip（烹調方式或外食怎麼買）；tips 給 2-3 句今天的整體提醒。`;
+  return callGemini(prompt, mealSchema);
+}

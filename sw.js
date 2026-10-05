@@ -1,5 +1,5 @@
 // 離線快取：先抓網路最新版（network-first），沒網路才用快取；API 請求不快取
-const CACHE = 'fitapp-v20';
+const CACHE = 'fitapp-v23';
 const SHELL = [
   './',
   './index.html',
@@ -18,6 +18,7 @@ const SHELL = [
   './js/xunlianguaishou.js',
   './js/split.js',
   './js/nutrition.js',
+  './js/meals.js',
   './js/gemini.js',
   './js/timer.js',
   './js/chart.js',

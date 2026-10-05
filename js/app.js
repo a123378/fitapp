@@ -1,6 +1,7 @@
 import { GOALS, LOCATIONS, MUSCLE_GROUPS, BIG_THREE, CARDIO_MODES, CARDIO_TYPES, GEMINI_DEFAULT_MODEL } from './config.js';
 import { store, estimate1RM, todayStr } from './store.js';
-import { generateSplitMenu, generateStrengthMenu, fallbackStrengthMenu, generateCardioPlan, fallbackCardioPlan, getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel } from './gemini.js';
+import { generateSplitMenu, generateStrengthMenu, fallbackStrengthMenu, generateCardioPlan, fallbackCardioPlan, getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, generateMealPlan } from './gemini.js';
+import { FOODS, localMealPlan, sanitizeMealPlan, totalsOf, unitText, rebalance, eatenTotals } from './meals.js';
 import { IntervalTimer, Stopwatch, Countdown, fmtClock, beep } from './timer.js';
 import { lineChartSVG, SERIES_COLORS } from './chart.js';
 import { GOALS_BODY, DAILY_ACTIVITY, computePlan, trendAdvice, weightEntries, getProfile } from './nutrition.js';
@@ -44,7 +45,7 @@ function navigate(r, mode) {
   route = r;
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.route === r));
   window.scrollTo(0, 0);
-  ({ home: renderHome, train: renderTrain, stats: renderStats, body: renderBody })[r]();
+  ({ home: renderHome, train: renderTrain, stats: renderStats, body: renderBody, diet: renderDiet })[r]();
 }
 
 // 訓練頁：上方切換重訓 / 有氧，同一頁操作
@@ -68,7 +69,7 @@ function closeSettings() { $modal.hidden = true; updateBadge(); if (route === 'h
 
 store.subscribe(() => {
   updateBadge();
-  if (route === 'home' || route === 'stats' || route === 'body') navigate(route);
+  if (['home', 'stats', 'body', 'diet'].includes(route)) navigate(route);
   if (!$modal.hidden) renderSettings();
 });
 function updateBadge() {
@@ -108,7 +109,7 @@ function renderHome() {
       ${ws.length ? ws.slice(0, 8).map(historyRow).join('') : '<p class="muted">還沒有紀錄，從上面開始第一次訓練吧。</p>'}
     </div>`;
   q('#go-strength').onclick = () => navigate('train', 'strength');
-  q('#go-body').onclick = () => navigate('body');
+  q('#go-body').onclick = () => navigate(plan.missing ? 'body' : 'diet');
   q('#go-cardio').onclick = () => navigate('train', 'cardio');
   q('#login') && (q('#login').onclick = async () => {
     try { await store.signIn(); }
@@ -772,6 +773,121 @@ function renderBody() {
     toast('已記錄 ⚖️');
   };
   qa('[data-delw]').forEach((b) => b.onclick = async () => { if (confirm('刪除這筆體重？')) await store.remove(b.dataset.delw); });
+}
+
+// ================= 飲食 =================
+function renderDiet() {
+  setTitle('飲食');
+  const prof = getProfile(store.workouts) || {};
+  const plan = computePlan(store.workouts);
+  if (plan.missing) {
+    $view.innerHTML = `<div class="card"><h3>🍱 飲食菜單</h3><p class="muted">${plan.missing === 'profile' ? '先到「體重」頁填個人資料並記錄體重，' : '先到「體重」頁記錄今天的體重，'}算出每日熱量和三大營養素後，就能排飲食菜單。</p><button class="btn primary block" id="to-body">前往體重頁</button></div>`;
+    q('#to-body').onclick = () => navigate('body');
+    return;
+  }
+  $view.innerHTML = h`
+    <div class="card accent">
+      <div class="row"><h3 class="grow">今天的目標・${esc(plan.goal.label)}</h3><span class="pill hot">${plan.target.toLocaleString()} kcal</span></div>
+      <div class="macro-mini"><span>蛋白質 <b>${plan.macros.protein}g</b></span><span>脂肪 <b>${plan.macros.fat}g</b></span><span>碳水 <b>${plan.macros.carb}g</b></span></div>
+      <p class="muted small">熱量和營養素在「體重」頁依體重和訓練頻率計算。</p>
+    </div>
+    ${mealCardHTML(plan)}`;
+  bindMealCard(plan, prof);
+}
+
+// ---------- 飲食菜單 ----------
+const mp = { mealCount: 3, train: true, loading: false, prefs: null, editing: null };
+function todayMealPlan() { return store.workouts.find((w) => w.type === 'mealplan' && w.date === todayStr()); }
+function mealCardHTML(plan) {
+  const saved = todayMealPlan();
+  if (mp.prefs == null) mp.prefs = (getProfile(store.workouts) || {}).mealPrefs || '';
+  const g = (n) => Math.round(n);
+  const controls = `
+    <div class="presets">${[[3, '三餐'], [4, '三餐 + 點心']].map(([k, l]) => `<button class="btn ${mp.mealCount === k ? 'active' : ''}" data-mc="${k}">${l}</button>`).join('')}</div>
+    <div class="presets mt">${[[true, '今天有練'], [false, '今天休息']].map(([k, l]) => `<button class="btn ${mp.train === k ? 'active' : ''}" data-tr="${k}">${l}</button>`).join('')}</div>
+    <label class="field mt"><span>偏好／不吃的東西（選填）</span><input type="text" id="mprefs" value="${esc(mp.prefs)}" placeholder="例如：不吃牛、外食為主、早餐只吃超商"></label>
+    <button class="btn primary block" id="genmeal" ${mp.loading ? 'disabled' : ''}>${mp.loading ? '安排中…' : saved ? '🔄 重新產生' : '🍱 產生今天的菜單'}</button>
+    ${getGeminiKey() ? '' : '<p class="muted small">沒有設定 Gemini key，會用本機規則排菜單。</p>'}`;
+  if (!saved) return `<div class="card"><h3>今日飲食菜單</h3><p class="muted small">依上面的熱量和三大營養素，排出今天每餐吃什麼、各吃多少克。</p>${controls}</div>`;
+  const anyEaten = saved.meals.some((m) => m.eaten);
+  const t = anyEaten ? (() => { const e = eatenTotals(saved.meals), l = totalsOf(saved.meals.filter((m) => !m.eaten)); return { kcal: e.kcal + l.kcal, p: e.p + l.p, f: e.f + l.f, c: e.c + l.c }; })() : totalsOf(saved.meals);
+  const stale = Math.abs((saved.target || 0) - plan.target) > 50;
+  return `<div class="card">
+    <div class="row"><h3 class="grow">今日飲食菜單</h3><span class="muted small">${esc(saved.source || '')}</span></div>
+    ${stale ? `<p class="small" style="color:var(--hot,#f5b942)">每日目標已經變成 ${plan.target} kcal，建議重新產生。</p>` : ''}
+    ${(() => { const e = eatenTotals(saved.meals); return saved.meals.some((m) => m.eaten) ? `<div class="note-box"><b>今天已吃</b> ${e.kcal} / ${plan.target} kcal<div class="macro-mini"><span>蛋白 <b>${e.p}</b>/${plan.macros.protein}</span><span>脂 <b>${e.f}</b>/${plan.macros.fat}</span><span>碳 <b>${e.c}</b>/${plan.macros.carb}</span></div>${saved.note ? `<p class="small">${esc(saved.note)}</p>` : ''}</div>` : ''; })()}
+    ${saved.meals.map((m, mi) => {
+      const shown = { items: m.eaten === 'skip' ? [] : m.items.map((it) => ({ food: it.food, grams: m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams })) };
+      const mt = totalsOf([shown]);
+      const badge = { full: '✅ 吃完', partial: '🟡 吃了一部分', skip: '⏭ 沒吃' }[m.eaten] || '';
+      const editing = mp.editing === mi;
+      return `<div class="meal ${m.eaten ? 'done' : ''}">
+      <div class="row"><b class="grow">${esc(m.name)} ${badge ? `<span class="small">${badge}</span>` : ''}</b><span class="muted small">${mt.kcal} kcal・蛋白 ${mt.p}・脂 ${mt.f}・碳 ${mt.c}</span></div>
+      ${m.items.map((it, ii) => editing
+        ? `<div class="meal-item"><span class="grow">${esc(it.food)}</span><input type="number" inputmode="decimal" class="ate-in" data-ii="${ii}" value="${g(it.ate ?? it.grams)}" style="width:72px"> g</div>`
+        : `<div class="meal-item ${m.eaten === 'skip' ? 'muted' : ''}"><span class="grow">${esc(it.food)}</span><b>${g(m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams)} g</b><span class="muted small">${m.eaten === 'partial' && it.ate != null && Math.round(it.ate) !== Math.round(it.grams) ? `原本 ${g(it.grams)} g` : esc(unitText(it.food, it.grams))}</span></div>`).join('')}
+      ${m.tip && !m.eaten ? `<p class="muted small">${esc(m.tip)}</p>` : ''}
+      ${editing
+        ? `<div class="presets mt"><button class="btn" data-half="${mi}">全部吃一半</button><button class="btn primary" data-ateok="${mi}">確定</button><button class="btn ghost" data-atecancel="1">取消</button></div><p class="muted small">填實際吃的克數，沒吃的填 0。</p>`
+        : m.eaten
+          ? `<div class="presets"><button class="btn ghost small" data-uneat="${mi}">↩︎ 改回還沒吃</button></div>`
+          : `<div class="presets"><button class="btn small" data-eat="${mi}" data-how="full">✅ 吃完了</button><button class="btn small" data-eat="${mi}" data-how="partial">✏️ 吃比較少</button><button class="btn small" data-eat="${mi}" data-how="skip">⏭ 沒吃</button></div>`}
+    </div>`; }).join('')}
+    <div class="macro-mini mt"><span>${anyEaten ? '吃完剩下的餐，全天約' : '全天合計'} <b>${t.kcal}</b> kcal</span><span>蛋白 <b>${t.p}</b>/${plan.macros.protein}</span><span>脂 <b>${t.f}</b>/${plan.macros.fat}</span><span>碳 <b>${t.c}</b>/${plan.macros.carb}</span></div>
+    ${saved.tips && saved.tips.length ? `<ul class="cues mt">${saved.tips.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    <p class="muted small">重量是煮熟後（燕麥是乾重）；蔬菜可以多吃。營養數字是常見食物的平均值，抓大概就好。</p>
+    <details class="mt"><summary class="muted small">換一份菜單</summary>${controls}</details>
+  </div>`;
+}
+function bindMealCard(plan, prof) {
+  qa('[data-mc]').forEach((b) => b.onclick = () => { mp.mealCount = Number(b.dataset.mc); qa('[data-mc]').forEach((x) => x.classList.toggle('active', x === b)); });
+  qa('[data-tr]').forEach((b) => b.onclick = () => { mp.train = b.dataset.tr === 'true'; qa('[data-tr]').forEach((x) => x.classList.toggle('active', x === b)); });
+  const saved = todayMealPlan();
+  const saveMeals = async (meals) => {
+    const r = rebalance(meals, plan.macros);
+    await store.add({ ...saved, meals: r.meals, note: r.note, target: plan.target, macros: plan.macros });
+    mp.editing = null;
+    if (route === 'diet') renderDiet();
+  };
+  if (saved) {
+    const meals = saved.meals.map((m) => ({ ...m, items: m.items.map((it) => ({ ...it })) }));
+    qa('[data-eat]').forEach((b) => b.onclick = () => {
+      const mi = Number(b.dataset.eat), how = b.dataset.how;
+      if (how === 'partial') { mp.editing = mi; renderDiet(); return; }
+      meals[mi].eaten = how; meals[mi].items.forEach((it) => { delete it.ate; });
+      saveMeals(meals);
+    });
+    qa('[data-uneat]').forEach((b) => b.onclick = () => { const m = meals[Number(b.dataset.uneat)]; delete m.eaten; m.items.forEach((it) => { delete it.ate; }); saveMeals(meals); });
+    qa('[data-half]').forEach((b) => b.onclick = () => qa('.ate-in').forEach((i) => { i.value = Math.round(Number(i.value) / 2); }));
+    qa('[data-atecancel]').forEach((b) => b.onclick = () => { mp.editing = null; renderDiet(); });
+    qa('[data-ateok]').forEach((b) => b.onclick = () => {
+      const m = meals[Number(b.dataset.ateok)];
+      qa('.ate-in').forEach((i) => { const it = m.items[Number(i.dataset.ii)]; it.ate = Math.max(0, Number(i.value) || 0); });
+      const all = m.items.every((it) => Math.round(it.ate) >= Math.round(it.grams));
+      m.eaten = all ? 'full' : m.items.every((it) => !it.ate) ? 'skip' : 'partial';
+      saveMeals(meals);
+    });
+  }
+  const btn = q('#genmeal'); if (!btn) return;
+  btn.onclick = async () => {
+    mp.prefs = q('#mprefs').value.trim();
+    mp.loading = true; btn.disabled = true; btn.textContent = '安排中…';
+    const args = { macros: plan.macros, mealCount: mp.mealCount, prefs: mp.prefs };
+    let r;
+    try {
+      if (!getGeminiKey()) throw new Error('NO_KEY');
+      const raw = await generateMealPlan({ ...args, target: plan.target, goalLabel: plan.goal.label, trainingToday: mp.train, foods: Object.keys(FOODS) });
+      r = sanitizeMealPlan(raw, plan.macros, mp.mealCount);
+    } catch (e) {
+      if (e.message !== 'NO_KEY') toast('AI 排菜單失敗，改用本機規則', 3000);
+      r = localMealPlan(args);
+    }
+    mp.loading = false;
+    if ((prof.mealPrefs || '') !== mp.prefs) await store.add({ id: 'profile', type: 'profile', date: '1900-01-01', ...prof, mealPrefs: mp.prefs });
+    await store.add({ id: `meal-${todayStr()}`, type: 'mealplan', date: todayStr(), target: plan.target, macros: plan.macros, meals: r.meals, tips: r.tips, source: r.source });
+    toast('今天的菜單排好了 🍱');
+    if (route === 'diet') renderDiet();
+  };
 }
 
 function renderStats() {
