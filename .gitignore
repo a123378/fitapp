@@ -1,0 +1,6 @@
+# Firebase 上傳時的暫存
+.firebase/
+firebase-debug.log
+node_modules/
+.DS_Store
+Thumbs.db
