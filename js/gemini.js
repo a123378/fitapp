@@ -1,5 +1,6 @@
 import { GOALS, LOCATIONS, MUSCLE_GROUPS, SIZE_RULES, GEMINI_DEFAULT_MODEL, CARDIO_MODES, CARDIO_TYPES } from './config.js';
 import { exercisesFor } from './exercises.js';
+import { formatSets } from './progression.js';
 import { creatorPool, PRINCIPLES, GROUP_CUES, AI_STATES, tipsFor } from './coaching.js';
 
 const KEY_STORAGE = 'fitapp.geminiKey';
@@ -10,13 +11,13 @@ export function setGeminiKey(k) { localStorage.setItem(KEY_STORAGE, (k || '').tr
 export function getGeminiModel() { return localStorage.getItem(MODEL_STORAGE) || GEMINI_DEFAULT_MODEL; }
 export function setGeminiModel(m) { localStorage.setItem(MODEL_STORAGE, (m || '').trim() || GEMINI_DEFAULT_MODEL); }
 
-async function callGemini(prompt, schema) {
+async function callGemini(prompt, schema, extraParts = []) {
   const key = getGeminiKey();
   if (!key) throw new Error('NO_KEY');
   const model = getGeminiModel();
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    contents: [{ role: 'user', parts: [{ text: prompt }, ...extraParts] }],
     generationConfig: {
       temperature: 0.7,
       responseMimeType: 'application/json',
@@ -78,7 +79,7 @@ function poolFor(location, partKey) {
 function historyText(history) {
   if (!history.length) return '（這個肌群還沒有紀錄）';
   return history.map((w) => `${w.date}：` + w.exercises.map((e) =>
-    `${e.name} ${e.hasWeight ? `${e.weight || '?'}kg×${e.reps || '?'}` : `${e.reps || '?'}下`}×${e.setsDone || e.sets}組`).join('、')).join('\n');
+    `${e.name} ${formatSets(e)}${e.deload ? '（減量）' : ''}`).join('、')).join('\n');
 }
 
 export async function generateStrengthMenu({ location, group, goal, ctx = {} }) {
@@ -353,4 +354,66 @@ ${trainingToday ? '今天有訓練：訓練前後那餐多放一點碳水和蛋�
 - grams 是煮熟後的重量（燕麥片是乾重）。總量盡量接近上面的三大營養素，程式會再微調份量。
 - 每餐可以給一句 tip（烹調方式或外食怎麼買）；tips 給 2-3 句今天的整體提醒。`;
   return callGemini(prompt, mealSchema);
+}
+
+// ---------- 拍照估熱量 ----------
+const photoSchema = {
+  type: 'OBJECT',
+  properties: {
+    dish: { type: 'STRING' },
+    items: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          name: { type: 'STRING' }, grams: { type: 'NUMBER' }, kcal: { type: 'NUMBER' },
+          protein: { type: 'NUMBER' }, fat: { type: 'NUMBER' }, carb: { type: 'NUMBER' }
+        },
+        required: ['name', 'grams', 'kcal', 'protein', 'fat', 'carb']
+      }
+    },
+    note: { type: 'STRING' }
+  },
+  required: ['items']
+};
+export async function analyzeFoodPhoto({ base64, mime = 'image/jpeg', hint = '' }) {
+  const prompt = `你是台灣的營養師。看這張照片，估計裡面的食物熱量和三大營養素。用繁體中文。
+- 把看得到的每樣食物分開列（例如：白飯、滷雞腿、炒高麗菜、滷蛋），name 用台灣常見的叫法。
+- grams 是照片裡這一份「煮熟後、實際會吃到」的重量；用餐具、便當盒、手的大小去推估份量。
+- 要把看得到的油、醬汁、勾芡、炸粉算進去（炒青菜、炸物、滷汁常常是熱量大宗）。
+- 飲料只算看得到的；不確定含不含糖時，在 note 提醒。
+- dish 給這一餐一個簡短名稱（例如「雞腿便當」）。
+- note 用一兩句說明最不確定的地方，例如「飯量可能被菜蓋住」。
+- 如果照片裡不是食物，items 回傳空陣列，note 說明原因。
+${hint ? `使用者補充：${hint}` : ''}`;
+  return callGemini(prompt, photoSchema, [{ inline_data: { mime_type: mime, data: base64 } }]);
+}
+
+// ---------- 每週回顧 ----------
+const reviewSchema = {
+  type: 'OBJECT',
+  properties: {
+    summary: { type: 'STRING' },
+    good: { type: 'ARRAY', items: { type: 'STRING' } },
+    improve: { type: 'ARRAY', items: { type: 'STRING' } },
+    actions: { type: 'ARRAY', items: { type: 'STRING' } }
+  },
+  required: ['summary', 'good', 'improve', 'actions']
+};
+export async function generateWeeklyReview({ dataText, localText }) {
+  const prompt = `你是自然健美教練兼運動營養師，幫一位台灣使用者看他「最近 7 天」的紀錄，寫一份簡短的每週回顧。用繁體中文、口語、直接。
+他練凱聖王 × 譚成義三分化（肌肥大），同時記體重和飲食。
+
+【資料】
+${dataText}
+
+【程式算出來的重點（可參考，可以重新排序或合併）】
+${localText}
+
+規則：
+- summary：一兩句總結這週，先講最重要的事。
+- good：做得好的 1-3 點；improve：要注意的 1-4 點；actions：下週具體要做的 2-4 件事（要能直接照做，例如「第二天每個背的動作加 1 組」「每天多 30 g 蛋白質」）。
+- 每點 40 字以內，只根據上面的資料，不要編數字；資料不足就直說要多記錄。
+- 訓練、體重、飲食要一起看（例如減脂中力量掉很多 → 檢查熱量和蛋白質）。`;
+  return callGemini(prompt, reviewSchema);
 }

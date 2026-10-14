@@ -2,6 +2,7 @@
 // 每條都標註來源博主；之後有新的講解照同樣格式往下加。
 import { ALL_MENUS, CREATORS } from './creators.js';
 import { GOALS } from './config.js';
+import { progressionAdvice } from './progression.js';
 
 // 通用原則（每一條都來自博主影片）
 export const PRINCIPLES = [
@@ -117,24 +118,7 @@ export function repRange(reps) {
   return [Math.min(a, b), Math.max(a, b)];
 }
 export function suggestNext(name, hasWeight, goalKey, workouts, range = null) {
-  const [lo, hi] = range || GOALS[goalKey].reps;
-  let last = null;
-  for (const w of workouts) {
-    if (w.type !== 'strength') continue;
-    const e = w.exercises.find((x) => x.name === name && x.reps > 0);
-    if (e) { last = { ...e, date: w.date }; break; }
-  }
-  if (!last) return null;
-  if (!hasWeight || !last.weight) {
-    return last.reps >= hi
-      ? { text: `上次 ${last.reps} 下已達上限，今天換較難的變化或放慢離心`, weight: null }
-      : { text: `上次 ${last.reps} 下，今天目標 ${last.reps + 1} 下`, weight: null };
-  }
-  const inc = last.weight >= 40 ? 2.5 : last.weight >= 10 ? 1 : 0.5;
-  const prev = `上次 ${last.weight} kg × ${last.reps}`;
-  if (last.reps >= hi) return { text: `${prev} → 今天加到 ${round(last.weight + inc)} kg`, weight: round(last.weight + inc) };
-  if (last.reps < lo) return { text: `${prev}，次數不到 ${lo}，今天降到 ${round(last.weight * 0.9)} kg 把動作做好`, weight: round(last.weight * 0.9) };
-  return { text: `${prev} → 同重量，目標多 1 下（${last.reps + 1}）`, weight: last.weight };
+  return progressionAdvice(name, hasWeight, workouts, range || GOALS[goalKey].reps);
 }
 
 function round(x) { return Math.round(x * 2) / 2; }

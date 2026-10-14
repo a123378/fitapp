@@ -122,3 +122,25 @@ export function trendAdvice(plan) {
   }
   return Math.abs(pctWk) <= 0.3 ? `這週 ${c > 0 ? '+' : ''}${c} kg，維持得很穩。` : `這週 ${c > 0 ? '+' : ''}${c} kg，若不是刻意的，可以微調碳水 20-30 g。`;
 }
+
+// ---------- 練習日 / 休息日（碳水循環）----------
+// 一週總熱量不變：練習日碳水多、熱量 +10%；休息日把多出來的扣回去。蛋白質、脂肪兩天一樣。
+// 每週練 0 次或天天練就不分。
+export function dayPlan(plan, dayType) {
+  if (!plan || plan.missing) return plan;
+  const n = Math.min(7, Math.max(0, Math.round(plan.freq.perWeek)));
+  if (n === 0 || n === 7 || !dayType) return { ...plan, dayType: null, cycle: null };
+  const T = plan.target;
+  const trainK = Math.round((T * 1.1) / 10) * 10;
+  const restK = Math.round(((7 * T - n * trainK) / (7 - n)) / 10) * 10;
+  const minCarb = Math.round(plan.weight.kg * 1); // 休息日碳水至少 1 g/kg
+  const carbFor = (k) => Math.max(minCarb, Math.round((k - plan.macros.protein * 4 - plan.macros.fat * 9) / 4));
+  const cycle = { n, train: { kcal: trainK, carb: carbFor(trainK) }, rest: { kcal: restK, carb: carbFor(restK) } };
+  const d = cycle[dayType];
+  const target = plan.macros.protein * 4 + plan.macros.fat * 9 + d.carb * 4;
+  const macros = { ...plan.macros, carb: d.carb };
+  return {
+    ...plan, dayType, cycle, target: Math.round(target / 10) * 10, macros,
+    pct: { protein: Math.round((macros.protein * 4 / target) * 100), fat: Math.round((macros.fat * 9 / target) * 100), carb: Math.round((macros.carb * 4 / target) * 100) }
+  };
+}

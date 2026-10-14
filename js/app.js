@@ -1,12 +1,14 @@
 import { GOALS, LOCATIONS, MUSCLE_GROUPS, BIG_THREE, CARDIO_MODES, CARDIO_TYPES, GEMINI_DEFAULT_MODEL } from './config.js';
 import { store, estimate1RM, todayStr } from './store.js';
-import { generateSplitMenu, generateStrengthMenu, fallbackStrengthMenu, generateCardioPlan, fallbackCardioPlan, getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, generateMealPlan } from './gemini.js';
-import { FOODS, localMealPlan, sanitizeMealPlan, totalsOf, unitText, rebalance, eatenTotals } from './meals.js';
+import { generateSplitMenu, generateStrengthMenu, fallbackStrengthMenu, generateCardioPlan, fallbackCardioPlan, getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, generateMealPlan, analyzeFoodPhoto, generateWeeklyReview } from './gemini.js';
+import { weeklyData, localReview, reviewDataText } from './review.js';
+import { FOODS, localMealPlan, sanitizeMealPlan, totalsOf, unitText, rebalance, eatenTotals, extrasTotals, portionText, HAND_GUIDE } from './meals.js';
 import { IntervalTimer, Stopwatch, Countdown, fmtClock, beep } from './timer.js';
 import { lineChartSVG, SERIES_COLORS } from './chart.js';
-import { GOALS_BODY, DAILY_ACTIVITY, computePlan, trendAdvice, weightEntries, getProfile } from './nutrition.js';
+import { GOALS_BODY, DAILY_ACTIVITY, dayPlan, computePlan, trendAdvice, weightEntries, getProfile } from './nutrition.js';
 import { creatorMenusFor, PART_LABELS, CREATORS } from './creators.js';
 import { GROUP_CUES, PRINCIPLES, suggestNext, repRange, groupHistory, daysSince, AI_STATES, AI_MINUTES, tipsFor, cuesFor, generalCues, embedUrl } from './coaching.js';
+import { plannedSets, summarizeSets, formatSets, exerciseHistory, deloadTarget, activeDeloadWeek, deloadAdvice, addDays, DELOAD_DAYS, muscleReport } from './progression.js';
 import { SPLIT_DAYS, CORE_SLOT, SPLIT_PLAN_VIDEO, WARMUPS, warmupForGroup, candidatesFor, nextSplitDay, lastSplit, splitProgress, lastSlotChoice } from './split.js';
 
 const $view = document.getElementById('view');
@@ -67,8 +69,28 @@ document.getElementById('close-settings').onclick = closeSettings;
 $modal.addEventListener('click', (e) => { if (e.target === $modal) closeSettings(); });
 function closeSettings() { $modal.hidden = true; updateBadge(); if (route === 'home') navigate('home'); }
 
+// Gemini key 跨裝置：登入 Google 後存在自己的 Firestore（{id:'settings'}，只有本人讀得到）；
+// 這台沒有 key、雲端有 → 自動帶入；這台有、雲端沒有 → 自動上傳
+function cloudSettings() { return store.workouts.find((w) => w.type === 'settings') || null; }
+let keySyncing = false;
+async function syncGeminiKey() {
+  if (store.mode !== 'firebase' || !store.user || keySyncing) return;
+  const c = cloudSettings();
+  if (c && c.geminiKey && !getGeminiKey()) { setGeminiKey(c.geminiKey); if (c.geminiModel) setGeminiModel(c.geminiModel); return; }
+  if (getGeminiKey() && (!c || !c.geminiKey)) {
+    keySyncing = true;
+    try { await store.add({ id: 'settings', type: 'settings', geminiKey: getGeminiKey(), geminiModel: getGeminiModel() }); } catch (e) { console.warn('key 同步失敗', e); }
+    keySyncing = false;
+  }
+}
+async function pushGeminiKey() {
+  if (store.mode !== 'firebase' || !store.user) return false;
+  await store.add({ ...(cloudSettings() || {}), id: 'settings', type: 'settings', geminiKey: getGeminiKey(), geminiModel: getGeminiModel() });
+  return true;
+}
 store.subscribe(() => {
   updateBadge();
+  syncGeminiKey();
   if (['home', 'stats', 'body', 'diet'].includes(route)) navigate(route);
   if (!$modal.hidden) renderSettings();
 });
@@ -83,7 +105,7 @@ function updateBadge() {
 function renderHome() {
   setTitle('我的健身');
   const ws = trainings();
-  const plan = computePlan(store.workouts);
+  const plan = todayPlan();
   const week = weekStart();
   const thisWeek = ws.filter((w) => w.date >= week);
   const strengthCount = thisWeek.filter((w) => w.type === 'strength').length;
@@ -99,9 +121,12 @@ function renderHome() {
       <button class="btn primary big grow" id="go-strength">🏋️ 開始重訓</button>
       <button class="btn big grow" id="go-cardio">🔥 開始有氧</button>
     </div>
+    ${resumeCardHTML()}
+    ${reviewDue() ? `<div class="card review" id="rv-home"><div class="row"><div class="grow"><h3>📋 這週的回顧可以看了</h3><p class="muted small">訓練、體重、飲食一起看，下週要調整什麼。</p></div><button class="btn primary" id="rv-home-go">看回顧</button></div></div>` : ''}
     <p class="muted small mb">下次重訓：三分化第 ${nextSplitDay(ws)} 天・${esc(SPLIT_DAYS[nextSplitDay(ws)].short)}（第 ${splitProgress(ws).round} 輪）</p>
+    ${deloadCardHTML()}
     <div class="card" id="go-body">${plan.missing ? `<h3>⚖️ 每日熱量與營養素</h3><p class="muted small">${plan.missing === 'profile' ? '到「體重」頁填個人資料並記錄體重，就會算出你的 TDEE 和三大營養素。' : '到「體重」頁記錄今天的體重，就會算出你的 TDEE 和三大營養素。'}</p>`
-      : `<div class="row"><div class="grow"><div class="muted small">今日目標（${esc(plan.goal.label)}）</div><div style="font-size:1.6rem;font-weight:800">${plan.target.toLocaleString()} kcal</div></div><div class="muted small" style="text-align:right">TDEE ${plan.tdee.toLocaleString()}<br>體重 ${plan.weight.kg} kg</div></div>
+      : `<div class="row"><div class="grow"><div class="muted small">今日目標（${esc(plan.goal.label)}${plan.dayType ? `・${plan.dayType === 'train' ? '練習日' : '休息日'}` : ''}）</div><div style="font-size:1.6rem;font-weight:800">${plan.target.toLocaleString()} kcal</div></div><div class="muted small" style="text-align:right">TDEE ${plan.tdee.toLocaleString()}<br>體重 ${plan.weight.kg} kg</div></div>
         <div class="macro-mini"><span>蛋白質 <b>${plan.macros.protein}g</b></span><span>脂肪 <b>${plan.macros.fat}g</b></span><span>碳水 <b>${plan.macros.carb}g</b></span></div>`}</div>
     ${store.mode === 'firebase' && !store.user ? `<div class="card accent"><h3>登入 Google 以同步紀錄</h3><p class="muted">登入後紀錄會存到 Firebase，換手機也在。</p><button class="btn primary block" id="login">使用 Google 登入</button></div>` : ''}
     <div class="card">
@@ -109,6 +134,9 @@ function renderHome() {
       ${ws.length ? ws.slice(0, 8).map(historyRow).join('') : '<p class="muted">還沒有紀錄，從上面開始第一次訓練吧。</p>'}
     </div>`;
   q('#go-strength').onclick = () => navigate('train', 'strength');
+  bindDeloadCard();
+  bindResumeCard(renderHome);
+  q('#rv-home-go') && (q('#rv-home-go').onclick = () => { autoReview = true; navigate('stats'); });
   q('#go-body').onclick = () => navigate(plan.missing ? 'body' : 'diet');
   q('#go-cardio').onclick = () => navigate('train', 'cardio');
   q('#login') && (q('#login').onclick = async () => {
@@ -124,6 +152,26 @@ function renderHome() {
     }
   });
   bindHistoryRows();
+}
+// 減量週：停滯的動作 ≥ 3 個，或連續練了 8 週沒減量 → 首頁建議
+const DELOAD_SKIP_KEY = 'fitapp.deloadSkipUntil';
+function deloadSkipUntil() { try { return localStorage.getItem(DELOAD_SKIP_KEY) || ''; } catch { return ''; } }
+function deloadCardHTML() {
+  const today = todayStr();
+  const wk = activeDeloadWeek(store.workouts, today);
+  if (wk) return `<div class="card deload"><div class="row"><div class="grow"><h3>🌙 減量週（到 ${wk.end.slice(5).replace('-', '/')}）</h3><p class="muted small">這週每個動作重量約平常的 9 成、組數減半、每組留 3 下。下週回到原本的重量。</p></div></div><button class="btn ghost small" id="dl-end">提前結束減量週</button></div>`;
+  const a = deloadAdvice(store.workouts, today);
+  if (!a.need || deloadSkipUntil() >= today) return '';
+  const why = [a.stalled.length >= 3 ? `${a.stalled.length} 個動作連續 3 次以上沒進步` : '', a.weeks >= 8 ? `已經連續練了 ${a.weeks} 週沒減量` : ''].filter(Boolean).join('，');
+  return `<div class="card deload"><h3>🌙 建議安排減量週</h3><p class="muted small">${esc(why)}。減量一週讓關節和神經恢復，之後通常能再突破。</p>
+    ${a.stalled.length ? `<ul class="cues">${a.stalled.slice(0, 5).map((x) => `<li>${esc(x.name)}<span class="muted small">・連續 ${x.since} 次沒進步</span></li>`).join('')}</ul>` : ''}
+    <div class="row mt" style="gap:8px"><button class="btn primary grow" id="dl-start">開始減量週（7 天）</button><button class="btn ghost" id="dl-skip">這週先不要</button></div></div>`;
+}
+function bindDeloadCard() {
+  const today = todayStr();
+  q('#dl-start') && (q('#dl-start').onclick = async () => { await store.add({ id: 'deload-week', type: 'deloadweek', start: today, end: addDays(today, DELOAD_DAYS - 1) }); toast('減量週開始 🌙 這週的菜單會自動減量'); renderHome(); });
+  q('#dl-skip') && (q('#dl-skip').onclick = () => { try { localStorage.setItem(DELOAD_SKIP_KEY, addDays(today, 6)); } catch {} renderHome(); });
+  q('#dl-end') && (q('#dl-end').onclick = async () => { if (!confirm('提前結束減量週？')) return; const wk = activeDeloadWeek(store.workouts, today); await store.add({ ...wk, end: addDays(today, -1) }); toast('已結束減量週'); renderHome(); });
 }
 function historyRow(w) {
   const label = w.type === 'strength'
@@ -146,9 +194,9 @@ function showWorkoutDetail(id) {
   if (!w) return;
   let body;
   if (w.type === 'strength') {
-    body = `<div class="ex-head"><span>動作</span><span>重量</span><span>次數</span><span>組數</span></div>` + w.exercises.map((e) => `
-      <div class="ex-row"><div><div class="name">${esc(e.name)}</div><div class="plan">${esc(e.part)}${e.e1rm ? `・估 1RM ${e.e1rm} kg` : ''}</div></div>
-      <div class="center">${e.hasWeight ? (e.weight ?? '-') + ' kg' : '徒手'}</div><div class="center">${e.reps ?? '-'}</div><div class="center">${e.setsDone ?? e.sets ?? '-'}</div></div>`).join('');
+    body = (w.deload ? '<p class="muted small">🌙 減量週</p>' : '') + w.exercises.map((e) => `
+      <div class="history-item"><div><div class="t">${esc(e.name)}${e.deload ? ' <span class="pill">減量</span>' : ''}</div><div class="d">${esc(e.part || '')}・${esc(formatSets(e))}</div></div>
+      <div class="muted small" style="text-align:right">${e.setsDone ?? e.sets ?? '-'} 組${e.e1rm ? `<br>估 1RM ${e.e1rm}` : ''}${e.volume && e.hasWeight ? `<br>總量 ${e.volume.toLocaleString()} kg` : ''}</div></div>`).join('');
   } else {
     body = `<p>${esc(w.title || '')}</p><p class="muted">時間 ${fmtClock(w.durationSec || 0)}${w.distanceKm ? `・距離 ${w.distanceKm} km` : ''}${w.rounds ? `・${w.rounds} 輪（${w.workSec}s / ${w.restSec}s）` : ''}</p>`;
   }
@@ -181,12 +229,43 @@ function renderStrength() {
   }
   renderStrengthMenu();
 }
+// ---- 練到一半的暫存：每打勾、改數字、換頁都存一次；App 被關掉回來可以繼續 ----
+const DRAFT_KEY = 'fitapp.draft';
+const DRAFT_HOURS = 18;
+function saveDraft() {
+  if (!st.menu) return;
+  const keep = ['mode', 'location', 'group', 'goal', 'menu', 'page', 'splitDay', 'addCore', 'slotChoice', 'warmMode'];
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ at: Date.now(), st: Object.fromEntries(keep.map((k) => [k, st[k]])) })); } catch {}
+}
+function loadDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+    if (!d || !d.st || !d.st.menu || Date.now() - d.at > DRAFT_HOURS * 3600000) return null;
+    return d;
+  } catch { return null; }
+}
+function clearDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch {} }
+function resumeCardHTML() {
+  if (st.menu) return '';
+  const d = loadDraft();
+  if (!d) return '';
+  const exs = d.st.menu.exercises || [];
+  const done = exs.reduce((a, e) => a + (e.log || []).filter((s) => s.done).length, 0);
+  const t = new Date(d.at);
+  return `<div class="card accent" id="resume-card"><h3>⏸ 有一份還沒存的訓練</h3><p class="muted small">${esc(d.st.menu.title || '重訓')}・已完成 ${done} 組・最後動作 ${t.getHours()}:${String(t.getMinutes()).padStart(2, '0')}</p>
+    <div class="row" style="gap:8px"><button class="btn primary grow" id="resume-go">▶ 繼續</button><button class="btn ghost" id="resume-drop">放棄</button></div></div>`;
+}
+function bindResumeCard(after) {
+  q('#resume-go') && (q('#resume-go').onclick = () => { const d = loadDraft(); if (!d) return; Object.assign(st, d.st); navigate('train', 'strength'); });
+  q('#resume-drop') && (q('#resume-drop').onclick = () => { if (!confirm('放棄這份訓練？填過的組數會清掉。')) return; clearDraft(); after(); });
+}
 function renderStrengthStep(step) {
   const map = { location: ['選擇地點', LOCATIONS, 1], group: ['選擇肌群', MUSCLE_GROUPS, 2], goal: ['選擇目標', GOALS, 3] };
   const [label, items, n] = map[step];
   $view.innerHTML = h`${segHTML()}${steps(n - 1, st.mode === 'split' ? 3 : 4)}<h2>${label}</h2>${st.mode === 'free' && step === 'group' ? '<p class="muted small">自由選擇：這次不算進三分化進度。</p>' : ''}${choiceGrid(items, 'k', st[step], step === 'goal' ? 'full' : '')}
     ${n > 1 ? `<button class="btn ghost block mt" id="back">← 上一步</button>` : ''}`;
   bindSeg();
+  if (step === 'location') { const seg = q('.seg'); const card = resumeCardHTML(); if (seg && card) { seg.insertAdjacentHTML('afterend', card); bindResumeCard(renderStrength); } }
   qa('[data-k]').forEach((el) => el.onclick = () => { st[step] = el.dataset.k; renderStrength(); });
   q('#back') && (q('#back').onclick = () => { if (step === 'group') { st.mode = 'split'; st.group = null; } else st[step === 'group' ? 'location' : 'group'] = null; renderStrength(); });
 }
@@ -235,9 +314,12 @@ function renderSplitDay() {
     <div class="presets mb">${[1, 2, 3].map((n) => `<button class="btn ${n === day ? 'active' : ''}" data-day="${n}">第 ${n} 天・${esc(SPLIT_DAYS[n].short)}</button>`).join('')}</div>
     <div class="card">
       <h3>今天的動作安排</h3>
+      ${activeDeloadWeek(store.workouts, todayStr()) ? '<div class="note-box deload mb">🌙 減量週：每個動作重量約 9 成、組數減半</div>' : ''}
       ${splitSlots(day).map((slot) => {
         const cands = candidatesFor(slot, st.location);
-        return `<div class="history-item"><div><div class="t">${esc(slotDefault(slot, cands))}</div><div class="d">${esc(slot.label)}・${slot.sets} 組 × ${esc(slot.reps)}・可替換 ${Math.max(0, cands.length - 1)} 個</div></div></div>`;
+        const name = slotDefault(slot, cands);
+        const adv = suggestNext(name, true, 'hypertrophy', store.workouts, repRange(slot.reps));
+        return `<div class="history-item"><div><div class="t">${esc(name)}</div><div class="d">${esc(slot.label)}・${slot.sets} 組 × ${esc(slot.reps)}・可替換 ${Math.max(0, cands.length - 1)} 個${adv && adv.deload ? '<br><span class="warn-text">🌙 停滯，今天這個動作減量</span>' : ''}</div></div></div>`;
       }).join('')}
       <label class="row mt" style="gap:8px;align-items:center"><input type="checkbox" id="core" ${st.addCore ? 'checked' : ''}> 最後加練核心</label>
     </div>
@@ -347,14 +429,40 @@ function renderAIOptions() {
   if (st.mode === 'split') q('h2').textContent = `告訴 AI 今天的狀況（三分化第 ${splitDayNow()} 天）`;
 }
 // 依上次紀錄幫每個動作算今天的建議重量（博主菜單和 AI 菜單都套用）
+// 減量：減量週（全部動作）或這個動作停滯（單一動作）→ 重量 9 成、組數減半、每組留 3 下；動作頁可切回照常練
 function withSuggestions(menu) {
+  const week = activeDeloadWeek(store.workouts, todayStr());
+  menu.deloadWeek = !!week;
   menu.exercises.forEach((e) => {
-    const s = suggestNext(e.name, e.hasWeight, st.goal, store.workouts, menu.split ? repRange(e.reps) : null);
-    e.suggest = s ? s.text : '';
-    e.suggestW = s ? s.weight : null;
+    e.sets = plannedSets(e);
     e.pro = tipsFor(e.name);
+    const s = suggestNext(e.name, e.hasWeight, st.goal, store.workouts, menu.split ? repRange(e.reps) : null);
+    const normal = s ? (s.normal || s) : null;
+    e.normalPlan = { sets: e.sets, rir: e.rir || '', suggest: normal ? normal.text : '', suggestW: normal ? normal.weight : null };
+    const dl = week ? deloadTarget(e.name, e.hasWeight, store.workouts) : s && s.deload ? s : null;
+    e.deloadPlan = dl ? { sets: Math.max(2, Math.ceil(e.sets / 2)), rir: '3', suggest: dl.text, suggestW: dl.weight } : null;
+    e.log = null;
+    Object.assign(e, dl ? e.deloadPlan : e.normalPlan, { deload: !!dl });
   });
   return menu;
+}
+// 切換這個動作要不要減量（保留已經打勾的組）
+function setDeload(e, on) {
+  const plan = on ? e.deloadPlan : e.normalPlan;
+  if (!plan) return;
+  Object.assign(e, plan, { deload: on });
+  if (!e.log) return;
+  const done = e.log.filter((x) => x.done);
+  const rest = Array.from({ length: Math.max(0, e.sets - done.length) }, () => ({ w: e.hasWeight ? (e.suggestW ?? '') : '', r: '', done: false }));
+  e.log = [...done, ...rest];
+}
+// 每組的輸入（第一次進到這個動作才建立，預填建議重量）
+function ensureLog(e) {
+  if (e.log) return e.log;
+  const w0 = e.hasWeight ? (e.suggestW ?? lastWeightFor(e.name) ?? '') : '';
+  e.w0 = w0;
+  e.log = Array.from({ length: plannedSets(e) }, () => ({ w: w0, r: '', done: false }));
+  return e.log;
 }
 async function renderStrengthGenerate() {
   $view.innerHTML = h`${segHTML()}${steps(3, 4)}<h2>安排菜單中…</h2>
@@ -427,6 +535,7 @@ function renderStrengthMenu() {
   if (pg.type === 'warmup') renderWarmupPage($page, m, pg.k);
   else if (pg.type === 'ex') renderExercisePage($page, m, pg.i);
   else renderFinishPage($page, m);
+  saveDraft();
 
   // 組間休息（每換一頁依該動作的休息時間預設）
   const $rt = q('#rt'), $clock = q('#rt-clock'), $start = q('#rt-start');
@@ -453,7 +562,7 @@ function renderStrengthMenu() {
   let x0 = null;
   $page.ontouchstart = (e) => { x0 = e.touches[0].clientX; };
   $page.ontouchend = (e) => { if (x0 == null) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) > 60) go(st.page + (dx < 0 ? 1 : -1)); };
-  q('#regen').onclick = () => { if (!confirm('離開這次訓練？填過的數字不會保存。')) return; document.body.classList.remove('training'); restTimer.stop(); st.menu = null; st.page = null; st.useAI = false; st.aiReady = false; renderStrength(); };
+  q('#regen').onclick = () => { if (!confirm('離開這次訓練？填過的數字不會保存。')) return; clearDraft(); document.body.classList.remove('training'); restTimer.stop(); st.menu = null; st.page = null; st.useAI = false; st.aiReady = false; renderStrength(); };
 }
 // 把目前頁面輸入的數字存回菜單（換頁不會遺失）
 function saveInputs(m) {
@@ -488,13 +597,13 @@ function renderExercisePage($p, m, i) {
   const proTexts = new Set((e.pro || []).map((p) => p.text));
   const cues = cuesFor(e.name, groups).filter((c) => !proTexts.has(c.text)).slice(0, 3);
   const clip = clipFor(e);
-  const wVal = e.inW ?? (e.hasWeight ? (e.suggestW ?? lastWeightFor(e.name) ?? '') : '');
   $p.innerHTML = `<div class="card ex-page">
     ${e.slotLabel ? `<div class="muted small">${esc(e.slotLabel)}${e.from ? `・${esc(e.from)}` : ''}</div>` : (m.creator ? `<div class="muted small">${esc(m.creator)}</div>` : '')}
     <h2 class="ex-title">${i + 1}. ${esc(e.name)}</h2>
     <div class="ex-plan"><span>${e.sets} 組</span><span>× ${esc(e.reps)}</span><span>休 ${esc(e.rest)}</span>${e.rir ? `<span>保留 ${esc(e.rir)} 下</span>` : ''}</div>
     ${clip ? clipHTML(clip.url, clip.t, clip.label, clip.embed) : ''}
-    ${e.suggest ? `<div class="note-box suggest">📈 ${esc(e.suggest)}</div>` : ''}
+    ${e.suggest ? `<div class="note-box ${e.deload ? 'deload' : 'suggest'}">${e.deload ? '' : '📈 '}${esc(e.suggest)}</div>` : ''}
+    ${e.deloadPlan ? `<button class="btn ghost small mt" id="dl-toggle">${e.deload ? '今天不減量，照常練' : '🌙 改回減量'}</button>` : ''}
     <div class="note-box">
       <b>注意事項</b>
       <ul class="cues">
@@ -505,13 +614,12 @@ function renderExercisePage($p, m, i) {
         ${!e.tip && !(e.pro || []).length && !cues.length && !e.why ? '<li class="muted">這個動作還沒有博主講解</li>' : ''}
       </ul>
     </div>
-    <div class="ex-inputs">
-      <label><span>最重一組 kg</span>${e.hasWeight ? `<input type="number" inputmode="decimal" step="0.5" placeholder="kg" data-w="${i}" value="${wVal}">` : `<div class="muted center">徒手</div>`}</label>
-      <label><span>次數</span><input type="number" inputmode="numeric" placeholder="次" data-r="${i}" value="${e.inR ?? ''}"></label>
-      <label><span>完成組數</span><input type="number" inputmode="numeric" data-s="${i}" value="${e.inS ?? e.sets}"></label>
-    </div>
+    <div class="set-table" id="sets-${i}"></div>
     ${e.slot ? `<button class="btn ghost block mt" data-swap="${i}">🔄 換動作</button><div class="swap" id="swap-${i}" hidden></div>` : ''}
   </div>`;
+  renderSetTable(q(`#sets-${i}`, $p), e);
+  const dt = q('#dl-toggle', $p);
+  if (dt) dt.onclick = () => { setDeload(e, !e.deload); renderExercisePage($p, m, i); };
   const b = q('[data-swap]', $p);
   if (b) b.onclick = () => {
     const box = q(`#swap-${i}`, $p);
@@ -532,13 +640,55 @@ function renderExercisePage($p, m, i) {
     });
   };
 }
+// 每一組一列：上次、kg、次數、✓（打勾自動開始組間休息）
+function renderSetTable($box, e) {
+  const log = ensureLog(e);
+  saveDraft();
+  const prev = exerciseHistory(e.name, store.workouts)[0];
+  const prevText = (k) => { const s = prev && prev.sets[k]; return s ? (s.w > 0 ? `${s.w}×${s.r}` : `${s.r} 下`) : '-'; };
+  $box.innerHTML = `
+    <div class="set-head"><span>組</span><span>上次</span><span>${e.hasWeight ? 'kg' : ''}</span><span>次數</span><span></span></div>
+    ${log.map((s, k) => `<div class="set-row ${s.done ? 'done' : ''}">
+      <span class="n">${k + 1}</span><span class="prev">${prevText(k)}</span>
+      ${e.hasWeight ? `<input type="number" inputmode="decimal" step="0.5" placeholder="kg" data-sw="${k}" value="${esc(String(s.w ?? ''))}">` : '<span class="muted center small">徒手</span>'}
+      <input type="number" inputmode="numeric" placeholder="${esc(String(repRange(e.reps)?.[1] ?? '次'))}" data-sr="${k}" value="${esc(String(s.r ?? ''))}">
+      <button class="btn ok" data-sd="${k}">${s.done && s.rir != null ? `留${s.rir >= 4 ? '4+' : s.rir}` : '✓'}</button></div>
+      ${e.rirAsk === k && s.done ? `<div class="rir-ask"><span class="muted small">還能再做幾下？</span>${[0, 1, 2, 3, 4].map((n) => `<button class="btn small" data-rir="${n}">${n === 4 ? '4+' : n}</button>`).join('')}<button class="btn ghost small" data-rirskip>略過</button></div>` : ''}`).join('')}
+    <div class="set-actions"><button class="btn ghost small grow" data-addset>＋ 加一組</button>${log.length > 1 ? '<button class="btn ghost small grow" data-delset>－ 刪最後一組</button>' : ''}</div>
+    <p class="muted small">做完一組按 ✓，休息計時會自動開始；kg 會帶到下一組。「還能再做幾下」選填，填了加重會更準。</p>`;
+  qa('[data-sw]', $box).forEach((el) => el.oninput = () => { log[Number(el.dataset.sw)].w = el.value; saveDraft(); });
+  qa('[data-sr]', $box).forEach((el) => el.oninput = () => { log[Number(el.dataset.sr)].r = el.value; saveDraft(); });
+  qa('[data-sd]', $box).forEach((el) => el.onclick = () => {
+    const k = Number(el.dataset.sd), s = log[k];
+    if (!s.done && !(Number(s.r) > 0)) { const r = q(`[data-sr="${k}"]`, $box); r.focus(); toast('先填這組做了幾下'); return; }
+    s.done = !s.done;
+    e.rirAsk = s.done ? k : null;
+    if (!s.done) delete s.rir;
+    if (s.done) {
+      const nx = log[k + 1];
+      // kg 帶到下一組；但比預填重量輕很多的（熱身組）不帶
+      if (nx && !nx.done && e.hasWeight && s.w !== '' && (nx.w === '' || !(Number(e.w0) > 0) || Number(s.w) >= Number(e.w0) * 0.9)) nx.w = s.w;
+      if (log.every((x) => x.done)) toast('這個動作完成了 💪');
+      if (restTimer) { restTimer.reset(); restTimer.start(); }
+    }
+    renderSetTable($box, e);
+  });
+  qa('[data-rir]', $box).forEach((el) => el.onclick = () => { log[e.rirAsk].rir = Number(el.dataset.rir); e.rirAsk = null; renderSetTable($box, e); });
+  q('[data-rirskip]', $box) && (q('[data-rirskip]', $box).onclick = () => { e.rirAsk = null; renderSetTable($box, e); });
+  const add = q('[data-addset]', $box);
+  add.onclick = () => { const l = log[log.length - 1]; log.push({ w: l ? l.w : '', r: '', done: false }); renderSetTable($box, e); };
+  const del = q('[data-delset]', $box);
+  if (del) del.onclick = () => { log.pop(); renderSetTable($box, e); };
+}
+// 存檔用：有填次數的組（打勾或沒打勾都算）
+function loggedSets(e) { return summarizeSets((e.log || []).filter((s) => s.done || Number(s.r) > 0), e.hasWeight); }
 function renderFinishPage($p, m) {
   const groups = m.split ? SPLIT_DAYS[m.split].groups : [st.group];
   const gen = [...generalCues(groups), ...(m.split ? PRINCIPLES.filter((p) => p.from.includes('譚成義')).slice(0, 3) : [])];
   $p.innerHTML = `<div class="card ex-page">
     <h2>✅ 今天練完了</h2>
-    <div class="ex-head"><span>動作</span><span>重量</span><span>次數</span><span>組數</span></div>
-    ${m.exercises.map((e) => `<div class="ex-row"><div class="name">${esc(e.name)}</div><div class="center">${e.hasWeight ? (e.inW || '-') : '徒手'}</div><div class="center">${e.inR || '-'}</div><div class="center">${e.inS || e.sets}</div></div>`).join('')}
+    ${m.deloadWeek ? '<p class="muted small">🌙 這次是減量週</p>' : ''}
+    ${m.exercises.map((e) => { const x = loggedSets(e); return `<div class="history-item"><div><div class="t">${esc(e.name)}${e.deload ? ' <span class="pill">減量</span>' : ''}</div><div class="d">${x.setsDone ? esc(formatSets(x)) : '還沒填'}</div></div><div class="muted small" style="text-align:right">${x.setsDone}/${e.sets} 組${x.e1rm ? `<br>估 1RM ${x.e1rm}` : ''}</div></div>`; }).join('')}
     ${gen.length ? `<details class="mt"><summary class="muted small">今天的訓練原則</summary><ul class="cues">${gen.map((c) => `<li>${esc(c.text)}<span class="muted small">・${esc(c.from)}</span></li>`).join('')}</ul></details>` : ''}
     ${m.note ? `<p class="muted small mt">${esc(m.note)}</p>` : ''}
     <label class="field"><span>日期</span><input type="date" id="date" value="${todayStr()}"></label>
@@ -546,16 +696,15 @@ function renderFinishPage($p, m) {
     <button class="btn primary big block" id="save">✅ 儲存這次訓練</button>
     <button class="btn ghost block mt" id="reset">重新選擇</button>
   </div>`;
-  q('#reset', $p).onclick = () => { if (!confirm('放棄這次訓練、重新選擇？')) return; document.body.classList.remove('training'); restTimer && restTimer.stop(); resetStrength(); renderStrength(); };
+  q('#reset', $p).onclick = () => { if (!confirm('放棄這次訓練、重新選擇？')) return; clearDraft(); document.body.classList.remove('training'); restTimer && restTimer.stop(); resetStrength(); renderStrength(); };
   q('#save', $p).onclick = async () => {
-    const exercises = m.exercises.map((e) => {
-      const weight = e.hasWeight ? Number(e.inW) || 0 : null;
-      const reps = Number(e.inR) || 0;
-      const setsDone = Number(e.inS) || e.sets;
-      return { name: e.name, part: e.part, hasWeight: e.hasWeight, sets: e.sets, setsDone, weight, reps, e1rm: e.hasWeight ? estimate1RM(weight, reps) : null, ...(e.slot ? { slot: e.slot } : {}) };
-    });
+    const exercises = m.exercises.map((e) => ({
+      name: e.name, part: e.part, ...(e.partKey ? { partKey: e.partKey } : {}), hasWeight: e.hasWeight, sets: plannedSets(e), ...loggedSets(e),
+      ...(e.deload ? { deload: true } : {}), ...(e.slot ? { slot: e.slot } : {})
+    }));
     if (!exercises.some((e) => e.reps > 0)) { if (!confirm('還沒填任何次數，確定要儲存嗎？')) return; }
-    await store.add({ type: 'strength', date: q('#date', $p).value || todayStr(), location: st.location, group: m.split ? `split${m.split}` : st.group, goal: st.goal, ...(m.split ? { split: { day: m.split } } : {}), title: m.title, source: m.url || null, exercises, note: q('#note', $p).value.trim() });
+    await store.add({ type: 'strength', date: q('#date', $p).value || todayStr(), location: st.location, group: m.split ? `split${m.split}` : st.group, goal: st.goal, ...(m.split ? { split: { day: m.split } } : {}), ...(m.deloadWeek ? { deload: true } : {}), title: m.title, source: m.url || null, exercises, note: q('#note', $p).value.trim() });
+    clearDraft();
     toast(m.split ? `已儲存 💪 下次輪到第 ${(m.split % 3) + 1} 天` : '已儲存 💪');
     restTimer && restTimer.stop();
     resetStrength();
@@ -728,7 +877,8 @@ function renderBody() {
           <li>基礎代謝 BMR <b>${plan.bmr.toLocaleString()}</b> kcal（${esc(plan.bmrFormula)}，體重用最近 7 天平均 ${plan.weight.kg} kg）</li>
           <li>活動係數 <b>${plan.factor}</b>：最近 ${plan.freq.days} 天練了 ${plan.freq.count} 次，平均每週 ${plan.freq.perWeek} 次 → ${plan.exFactor}${plan.factor !== plan.exFactor ? `，加上平常活動 +${Math.round((plan.factor - plan.exFactor) * 100) / 100}` : ''}</li>
           <li>TDEE（每日總消耗）= ${plan.bmr.toLocaleString()} × ${plan.factor} = <b>${plan.tdee.toLocaleString()}</b> kcal</li>
-          <li>${esc(plan.goal.label)}：${esc(plan.goal.desc)} → <b>${plan.target.toLocaleString()}</b> kcal</li>
+          <li>${esc(plan.goal.label)}：${esc(plan.goal.desc)} → <b>${plan.target.toLocaleString()}</b> kcal（每日平均）</li>
+          ${(() => { const cy = dayPlan(plan, 'train').cycle; return cy ? `<li>每週練約 ${cy.n} 次 → 練習日 <b>${cy.train.kcal.toLocaleString()}</b> kcal（碳水 ${cy.train.carb} g）、休息日 <b>${cy.rest.kcal.toLocaleString()}</b> kcal（碳水 ${cy.rest.carb} g），蛋白質和脂肪兩天一樣</li>` : ''; })()}
         </ul>
         <p class="muted small">每記錄一次體重、或存一次訓練，都會重新計算。</p>
       </div>
@@ -776,56 +926,214 @@ function renderBody() {
 }
 
 // ================= 飲食 =================
+// 今天是練習日還是休息日：飲食頁手動選的優先，沒選就看今天有沒有訓練紀錄
+function todayDayType() {
+  const saved = todayMealPlan();
+  if (saved?.dayType) return saved.dayType;
+  return trainings().some((w) => w.date === todayStr()) ? 'train' : 'rest';
+}
+function todayPlan() { return dayPlan(computePlan(store.workouts), todayDayType()); }
 function renderDiet() {
   setTitle('飲食');
   const prof = getProfile(store.workouts) || {};
-  const plan = computePlan(store.workouts);
+  const plan = todayPlan();
   if (plan.missing) {
     $view.innerHTML = `<div class="card"><h3>🍱 飲食菜單</h3><p class="muted">${plan.missing === 'profile' ? '先到「體重」頁填個人資料並記錄體重，' : '先到「體重」頁記錄今天的體重，'}算出每日熱量和三大營養素後，就能排飲食菜單。</p><button class="btn primary block" id="to-body">前往體重頁</button></div>`;
     q('#to-body').onclick = () => navigate('body');
     return;
   }
+  const saved = todayMealPlan();
+  const e = eatenTotals(saved?.meals || [], saved?.extras || []);
+  const pct = (a, b) => Math.min(100, Math.round((a / Math.max(1, b)) * 100));
+  const bar = (label, a, b, color) => `<div class="macro"><div class="row"><b class="grow">${label}</b><span><b>${a}</b> / ${b}</span></div><div class="mbar"><i style="width:${pct(a, b)}%;background:${color}"></i></div></div>`;
+  const cy = plan.cycle;
   $view.innerHTML = h`
     <div class="card accent">
-      <div class="row"><h3 class="grow">今天的目標・${esc(plan.goal.label)}</h3><span class="pill hot">${plan.target.toLocaleString()} kcal</span></div>
-      <div class="macro-mini"><span>蛋白質 <b>${plan.macros.protein}g</b></span><span>脂肪 <b>${plan.macros.fat}g</b></span><span>碳水 <b>${plan.macros.carb}g</b></span></div>
-      <p class="muted small">熱量和營養素在「體重」頁依體重和訓練頻率計算。</p>
+      ${cy ? `<div class="presets dt-row mb">${[['train', '💪 練習日', cy.train.kcal], ['rest', '😴 休息日', cy.rest.kcal]].map(([k, l, kc]) => `<button class="btn ${plan.dayType === k ? 'active' : ''}" data-dt="${k}">${l}・${kc}</button>`).join('')}</div>` : ''}
+      <div class="row"><h3 class="grow">今天・${esc(plan.goal.label)}</h3><span class="pill hot">${e.kcal.toLocaleString()} / ${plan.target.toLocaleString()} kcal</span></div>
+      ${bar('蛋白質 g', e.p, plan.macros.protein, '#4f8cff')}
+      ${bar('脂肪 g', e.f, plan.macros.fat, '#f5b942')}
+      ${bar('碳水 g', e.c, plan.macros.carb, '#3ccf8e')}
+      ${saved?.note ? `<p class="small mt">${esc(saved.note)}</p>` : ''}
+      <p class="muted small">已吃 / 目標。${cy ? `你每週練約 ${cy.n} 次：練習日多吃碳水、休息日少一點，一週總熱量和「體重」頁算的一樣。` : '目標在「體重」頁依體重和訓練頻率計算。'}</p>
     </div>
+    ${logCardHTML(saved)}
     ${mealCardHTML(plan)}`;
+  bindLogCard(plan);
   bindMealCard(plan, prof);
+  qa('[data-dt]').forEach((b) => b.onclick = async () => {
+    const dt = b.dataset.dt;
+    const saved = todayMealPlan() || { id: `meal-${todayStr()}`, type: 'mealplan', date: todayStr(), meals: [], extras: [] };
+    const np = dayPlan(computePlan(store.workouts), dt);
+    const meals = (saved.meals || []).map((m) => ({ ...m, items: m.items.map((it) => ({ ...it })) }));
+    const r = meals.length ? rebalance(meals, np.macros, saved.extras || []) : { meals, note: saved.note || '' };
+    await store.add({ ...saved, dayType: dt, meals: r.meals, note: r.note, target: np.target, macros: np.macros });
+    if (route === 'diet') renderDiet();
+  });
+}
+
+// ---------- 拍照／手動記錄吃了什麼 ----------
+const lg = { draft: null, busy: false, hint: '' };
+const r1 = (n) => Math.round((+n || 0) * 10) / 10;
+function nowHM() { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
+function logCardHTML(saved) {
+  const extras = saved?.extras || [];
+  const openMeals = (saved?.meals || []).map((m, i) => ({ m, i })).filter(({ m }) => !m.eaten);
+  const d = lg.draft;
+  let body;
+  if (lg.busy) body = `<div class="center"><div class="spinner"></div><p class="muted">Gemini 正在看照片…</p></div>`;
+  else if (d) {
+    const t = extrasTotals([d]);
+    body = `
+      ${d.thumb ? `<img src="${d.thumb}" alt="" class="snap-thumb">` : ''}
+      <label class="field"><span>這一餐</span><input type="text" id="d-dish" value="${esc(d.dish || '')}" placeholder="例如：雞腿便當"></label>
+      ${d.items.map((it, i) => `<div class="d-row" data-di="${i}">
+        <div class="d-top"><input type="text" data-k="name" value="${esc(it.name)}" placeholder="食物名稱"><input type="number" inputmode="decimal" data-k="grams" value="${r1(it.grams)}"><span class="muted small">g</span><button class="btn ghost small" data-ddel="${i}">✕</button></div>
+        <div class="d-nums">${[['kcal', 'kcal'], ['p', '蛋白'], ['f', '脂'], ['c', '碳']].map(([k, l]) => `<label><span>${l}</span><input type="number" inputmode="decimal" data-k="${k}" value="${r1(it[k])}"></label>`).join('')}</div>
+      </div>`).join('')}
+      <button class="btn ghost small" id="d-add">＋ 加一項</button>
+      <p class="small mt" id="d-tot">合計 <b>${t.kcal}</b> kcal・蛋白 ${t.p}・脂 ${t.f}・碳 ${t.c}</p>
+      ${d.note ? `<p class="muted small">💬 ${esc(d.note)}</p>` : ''}
+      <label class="field"><span>算在哪一餐</span><select id="d-meal"><option value="">額外加吃（不影響菜單上的餐）</option>${openMeals.map(({ m, i }) => `<option value="${i}" ${String(d.meal) === String(i) ? 'selected' : ''}>取代菜單的「${esc(m.name)}」</option>`).join('')}</select></label>
+      <p class="muted small">改克數，熱量和營養素會照比例一起變。數字都是估計值，照片看不出油量和醬汁時會偏低。</p>
+      <div class="row" style="gap:8px"><button class="btn primary grow" id="d-save">儲存</button><button class="btn" id="d-cancel">取消</button></div>`;
+  } else {
+    body = `
+      <label class="field"><span>補充說明（選填，拍照前填）</span><input type="text" id="snaphint" value="${esc(lg.hint)}" placeholder="例如：飯只吃一半、飲料是無糖"></label>
+      <div class="row" style="gap:8px"><button class="btn primary grow" id="snap">📷 拍照估熱量</button><button class="btn grow" id="manual">✏️ 手動輸入</button></div>
+      <input type="file" id="snapfile" accept="image/*" capture="environment" hidden>
+      ${getGeminiKey() ? '' : '<p class="muted small">拍照估熱量要先在 ⚙️ 設定填 Gemini API key；手動輸入不用。</p>'}`;
+  }
+  return `<div class="card">
+    <h3>📷 記錄吃了什麼</h3>
+    ${body}
+    ${extras.length ? `<div class="mt">${extras.map((x, i) => { const t = extrasTotals([x]); return `<div class="history-item"><div><div class="t">${esc(x.dish || '一餐')}${x.mealName ? `<span class="muted small">・取代${esc(x.mealName)}</span>` : ''}</div><div class="d">${esc(x.time || '')}・${t.kcal} kcal・蛋白 ${t.p}・脂 ${t.f}・碳 ${t.c}</div></div><button class="btn ghost small" data-xdel="${i}">🗑</button></div>`; }).join('')}</div>` : ''}
+  </div>`;
+}
+function readDraftInputs() {
+  const d = lg.draft; if (!d) return;
+  const dish = q('#d-dish'); if (dish) d.dish = dish.value;
+  const sel = q('#d-meal'); if (sel) d.meal = sel.value;
+  qa('.d-row').forEach((row) => {
+    const it = d.items[Number(row.dataset.di)];
+    row.querySelectorAll('input').forEach((inp) => { it[inp.dataset.k] = inp.dataset.k === 'name' ? inp.value : Number(inp.value) || 0; });
+  });
+}
+async function fileToJpeg(file, max) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const k = Math.min(1, max / Math.max(img.width, img.height));
+    const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.8);
+  } finally { URL.revokeObjectURL(url); }
+}
+function bindLogCard(plan) {
+  const rerender = () => { if (route === 'diet') renderDiet(); };
+  const hint = q('#snaphint'); if (hint) hint.oninput = () => { lg.hint = hint.value; };
+  const file = q('#snapfile');
+  if (q('#snap')) q('#snap').onclick = () => { if (!getGeminiKey()) { toast('要先在 ⚙️ 設定填 Gemini API key'); return; } file.click(); };
+  if (file) file.onchange = async () => {
+    const f = file.files[0]; if (!f) return;
+    lg.busy = true; rerender();
+    try {
+      const big = await fileToJpeg(f, 1024), thumb = await fileToJpeg(f, 240);
+      const r = await analyzeFoodPhoto({ base64: big.split(',')[1], hint: lg.hint });
+      const items = (r.items || []).map((it) => ({ name: it.name, grams: +it.grams || 0, kcal: +it.kcal || 0, p: +it.protein || 0, f: +it.fat || 0, c: +it.carb || 0 }));
+      if (!items.length) toast(r.note || '照片裡看不到食物', 4000);
+      lg.draft = { dish: r.dish || '', items: items.length ? items : [{ name: '', grams: 0, kcal: 0, p: 0, f: 0, c: 0 }], note: r.note || '', thumb, meal: '' };
+      lg.hint = '';
+    } catch (e) { toast('估算失敗：' + e.message.slice(0, 80), 5000); }
+    lg.busy = false; rerender();
+  };
+  if (q('#manual')) q('#manual').onclick = () => { lg.draft = { dish: '', items: [{ name: '', grams: 0, kcal: 0, p: 0, f: 0, c: 0 }], note: '', meal: '' }; rerender(); };
+  if (!lg.draft) bindExtrasDelete(plan);
+  if (!lg.draft || lg.busy) return;
+  q('#d-dish').oninput = (e) => { lg.draft.dish = e.target.value; };
+  q('#d-meal').onchange = (e) => { lg.draft.meal = e.target.value; };
+  // 改克數 → 其他數字照比例
+  qa('.d-row').forEach((row) => {
+    const it = lg.draft.items[Number(row.dataset.di)];
+    row.querySelectorAll('input').forEach((inp) => inp.oninput = () => {
+      const k = inp.dataset.k;
+      if (k === 'grams' && it.grams > 0) {
+        const ratio = (Number(inp.value) || 0) / it.grams;
+        ['kcal', 'p', 'f', 'c'].forEach((kk) => { it[kk] = it[kk] * ratio; row.querySelector(`[data-k="${kk}"]`).value = r1(it[kk]); });
+        it.grams = Number(inp.value) || 0;
+      } else it[k] = k === 'name' ? inp.value : Number(inp.value) || 0;
+      const t = extrasTotals([lg.draft]);
+      q('#d-tot').innerHTML = `合計 <b>${t.kcal}</b> kcal・蛋白 ${t.p}・脂 ${t.f}・碳 ${t.c}`;
+    });
+  });
+  qa('[data-ddel]').forEach((b) => b.onclick = () => { readDraftInputs(); lg.draft.items.splice(Number(b.dataset.ddel), 1); rerender(); });
+  q('#d-add').onclick = () => { readDraftInputs(); lg.draft.items.push({ name: '', grams: 0, kcal: 0, p: 0, f: 0, c: 0 }); rerender(); };
+  q('#d-cancel').onclick = () => { lg.draft = null; rerender(); };
+  q('#d-save').onclick = async () => {
+    readDraftInputs();
+    const d = lg.draft;
+    const items = d.items.filter((it) => it.name.trim() || it.kcal > 0).map((it) => ({ name: it.name.trim() || '食物', grams: r1(it.grams), kcal: Math.round(it.kcal), p: r1(it.p), f: r1(it.f), c: r1(it.c) }));
+    if (!items.length) { toast('至少填一樣食物'); return; }
+    // 只填熱量沒填營養素時，照目標比例粗估，避免剩下的餐算錯
+    items.forEach((it) => { if (it.kcal > 0 && !it.p && !it.f && !it.c) { it.p = r1(it.kcal * plan.pct.protein / 400); it.f = r1(it.kcal * plan.pct.fat / 900); it.c = r1(it.kcal * plan.pct.carb / 400); } if (!it.kcal) it.kcal = Math.round(it.p * 4 + it.f * 9 + it.c * 4); });
+    const saved = todayMealPlan() || { id: `meal-${todayStr()}`, type: 'mealplan', date: todayStr(), meals: [], target: plan.target, macros: plan.macros };
+    const meals = (saved.meals || []).map((m) => ({ ...m, items: m.items.map((it) => ({ ...it })) }));
+    const extras = [...(saved.extras || [])];
+    const mi = d.meal === '' || d.meal == null ? null : Number(d.meal);
+    if (mi != null && meals[mi]) meals[mi].eaten = 'other';
+    extras.push({ time: nowHM(), dish: d.dish.trim(), items, note: d.note || '', ...(mi != null && meals[mi] ? { mealIndex: mi, mealName: meals[mi].name } : {}) });
+    const r = rebalance(meals, plan.macros, extras);
+    await store.add({ ...saved, meals: r.meals, extras, note: r.note, target: plan.target, macros: plan.macros });
+    lg.draft = null; toast('已記錄 🍽');
+    rerender();
+  };
+}
+function bindExtrasDelete(plan) {
+  qa('[data-xdel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('刪除這筆紀錄？')) return;
+    const saved = todayMealPlan(); if (!saved) return;
+    const extras = [...(saved.extras || [])];
+    const [x] = extras.splice(Number(b.dataset.xdel), 1);
+    const meals = (saved.meals || []).map((m) => ({ ...m, items: m.items.map((it) => ({ ...it })) }));
+    if (x && x.mealIndex != null && meals[x.mealIndex]?.eaten === 'other' && !extras.some((y) => y.mealIndex === x.mealIndex)) delete meals[x.mealIndex].eaten;
+    const r = rebalance(meals, plan.macros, extras);
+    await store.add({ ...saved, meals: r.meals, extras, note: r.note });
+    if (route === 'diet') renderDiet();
+  });
 }
 
 // ---------- 飲食菜單 ----------
-const mp = { mealCount: 3, train: true, loading: false, prefs: null, editing: null };
+const mp = { mealCount: 3, loading: false, prefs: null, editing: null, cook: null };
 function todayMealPlan() { return store.workouts.find((w) => w.type === 'mealplan' && w.date === todayStr()); }
 function mealCardHTML(plan) {
   const saved = todayMealPlan();
   if (mp.prefs == null) mp.prefs = (getProfile(store.workouts) || {}).mealPrefs || '';
+  if (mp.cook == null) mp.cook = (getProfile(store.workouts) || {}).cookMode || 'home';
   const g = (n) => Math.round(n);
   const controls = `
     <div class="presets">${[[3, '三餐'], [4, '三餐 + 點心']].map(([k, l]) => `<button class="btn ${mp.mealCount === k ? 'active' : ''}" data-mc="${k}">${l}</button>`).join('')}</div>
-    <div class="presets mt">${[[true, '今天有練'], [false, '今天休息']].map(([k, l]) => `<button class="btn ${mp.train === k ? 'active' : ''}" data-tr="${k}">${l}</button>`).join('')}</div>
     <label class="field mt"><span>偏好／不吃的東西（選填）</span><input type="text" id="mprefs" value="${esc(mp.prefs)}" placeholder="例如：不吃牛、外食為主、早餐只吃超商"></label>
-    <button class="btn primary block" id="genmeal" ${mp.loading ? 'disabled' : ''}>${mp.loading ? '安排中…' : saved ? '🔄 重新產生' : '🍱 產生今天的菜單'}</button>
+    <button class="btn primary block" id="genmeal" ${mp.loading ? 'disabled' : ''}>${mp.loading ? '安排中…' : saved?.meals?.length ? '🔄 重新產生' : '🍱 產生今天的菜單'}</button>
     ${getGeminiKey() ? '' : '<p class="muted small">沒有設定 Gemini key，會用本機規則排菜單。</p>'}`;
-  if (!saved) return `<div class="card"><h3>今日飲食菜單</h3><p class="muted small">依上面的熱量和三大營養素，排出今天每餐吃什麼、各吃多少克。</p>${controls}</div>`;
-  const anyEaten = saved.meals.some((m) => m.eaten);
-  const t = anyEaten ? (() => { const e = eatenTotals(saved.meals), l = totalsOf(saved.meals.filter((m) => !m.eaten)); return { kcal: e.kcal + l.kcal, p: e.p + l.p, f: e.f + l.f, c: e.c + l.c }; })() : totalsOf(saved.meals);
+  if (!saved || !(saved.meals || []).length) return `<div class="card"><h3>今日飲食菜單</h3><p class="muted small">依上面的熱量和三大營養素，排出今天每餐吃什麼、各吃多少克。</p>${controls}</div>`;
+  const anyEaten = saved.meals.some((m) => m.eaten) || (saved.extras || []).length > 0;
+  const t = anyEaten ? (() => { const e = eatenTotals(saved.meals, saved.extras || []), l = totalsOf(saved.meals.filter((m) => !m.eaten)); return { kcal: e.kcal + l.kcal, p: e.p + l.p, f: e.f + l.f, c: e.c + l.c }; })() : totalsOf(saved.meals);
   const stale = Math.abs((saved.target || 0) - plan.target) > 50;
   return `<div class="card">
     <div class="row"><h3 class="grow">今日飲食菜單</h3><span class="muted small">${esc(saved.source || '')}</span></div>
+    <div class="presets mb">${[['home', '🍳 自己煮'], ['out', '🥡 外食'], ['cooked', '⚖️ 熟重']].map(([k, l]) => `<button class="btn small ${mp.cook === k ? 'active' : ''}" data-cook="${k}">${l}</button>`).join('')}</div>
+    <p class="muted small">${mp.cook === 'home' ? '肉和魚顯示「生重」（下鍋前秤），飯和麵顯示生米／乾麵重量；其他照寫的秤。油用量匙。' : mp.cook === 'out' ? esc(HAND_GUIDE) : '全部是煮熟後的重量（燕麥是乾重）。'}</p>
     ${stale ? `<p class="small" style="color:var(--hot,#f5b942)">每日目標已經變成 ${plan.target} kcal，建議重新產生。</p>` : ''}
-    ${(() => { const e = eatenTotals(saved.meals); return saved.meals.some((m) => m.eaten) ? `<div class="note-box"><b>今天已吃</b> ${e.kcal} / ${plan.target} kcal<div class="macro-mini"><span>蛋白 <b>${e.p}</b>/${plan.macros.protein}</span><span>脂 <b>${e.f}</b>/${plan.macros.fat}</span><span>碳 <b>${e.c}</b>/${plan.macros.carb}</span></div>${saved.note ? `<p class="small">${esc(saved.note)}</p>` : ''}</div>` : ''; })()}
     ${saved.meals.map((m, mi) => {
-      const shown = { items: m.eaten === 'skip' ? [] : m.items.map((it) => ({ food: it.food, grams: m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams })) };
+      const shown = { items: ['skip', 'other'].includes(m.eaten) ? [] : m.items.map((it) => ({ food: it.food, grams: m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams })) };
       const mt = totalsOf([shown]);
-      const badge = { full: '✅ 吃完', partial: '🟡 吃了一部分', skip: '⏭ 沒吃' }[m.eaten] || '';
+      const badge = { full: '✅ 吃完', partial: '🟡 吃了一部分', skip: '⏭ 沒吃', other: '🔄 改吃別的' }[m.eaten] || '';
       const editing = mp.editing === mi;
       return `<div class="meal ${m.eaten ? 'done' : ''}">
       <div class="row"><b class="grow">${esc(m.name)} ${badge ? `<span class="small">${badge}</span>` : ''}</b><span class="muted small">${mt.kcal} kcal・蛋白 ${mt.p}・脂 ${mt.f}・碳 ${mt.c}</span></div>
       ${m.items.map((it, ii) => editing
         ? `<div class="meal-item"><span class="grow">${esc(it.food)}</span><input type="number" inputmode="decimal" class="ate-in" data-ii="${ii}" value="${g(it.ate ?? it.grams)}" style="width:72px"> g</div>`
-        : `<div class="meal-item ${m.eaten === 'skip' ? 'muted' : ''}"><span class="grow">${esc(it.food)}</span><b>${g(m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams)} g</b><span class="muted small">${m.eaten === 'partial' && it.ate != null && Math.round(it.ate) !== Math.round(it.grams) ? `原本 ${g(it.grams)} g` : esc(unitText(it.food, it.grams))}</span></div>`).join('')}
+        : (() => { const gr = m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams; const pt = portionText(it.food, gr, mp.cook); return `<div class="meal-item ${['skip', 'other'].includes(m.eaten) ? 'muted' : ''}"><span class="grow">${esc(it.food)}</span><b>${esc(pt.main)}</b><span class="muted small">${m.eaten === 'partial' && it.ate != null && Math.round(it.ate) !== Math.round(it.grams) ? `原本 ${g(it.grams)} g` : esc(pt.sub)}</span></div>`; })()).join('')}
       ${m.tip && !m.eaten ? `<p class="muted small">${esc(m.tip)}</p>` : ''}
       ${editing
         ? `<div class="presets mt"><button class="btn" data-half="${mi}">全部吃一半</button><button class="btn primary" data-ateok="${mi}">確定</button><button class="btn ghost" data-atecancel="1">取消</button></div><p class="muted small">填實際吃的克數，沒吃的填 0。</p>`
@@ -835,16 +1143,21 @@ function mealCardHTML(plan) {
     </div>`; }).join('')}
     <div class="macro-mini mt"><span>${anyEaten ? '吃完剩下的餐，全天約' : '全天合計'} <b>${t.kcal}</b> kcal</span><span>蛋白 <b>${t.p}</b>/${plan.macros.protein}</span><span>脂 <b>${t.f}</b>/${plan.macros.fat}</span><span>碳 <b>${t.c}</b>/${plan.macros.carb}</span></div>
     ${saved.tips && saved.tips.length ? `<ul class="cues mt">${saved.tips.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
-    <p class="muted small">重量是煮熟後（燕麥是乾重）；蔬菜可以多吃。營養數字是常見食物的平均值，抓大概就好。</p>
+    <p class="muted small">蔬菜可以多吃。營養數字是常見食物的平均值，抓大概就好；「吃比較少」裡填的是熟重。</p>
     <details class="mt"><summary class="muted small">換一份菜單</summary>${controls}</details>
   </div>`;
 }
 function bindMealCard(plan, prof) {
   qa('[data-mc]').forEach((b) => b.onclick = () => { mp.mealCount = Number(b.dataset.mc); qa('[data-mc]').forEach((x) => x.classList.toggle('active', x === b)); });
-  qa('[data-tr]').forEach((b) => b.onclick = () => { mp.train = b.dataset.tr === 'true'; qa('[data-tr]').forEach((x) => x.classList.toggle('active', x === b)); });
+  qa('[data-cook]').forEach((b) => b.onclick = async () => {
+    mp.cook = b.dataset.cook;
+    const p = getProfile(store.workouts);
+    if (p) await store.add({ ...p, cookMode: mp.cook });
+    if (route === 'diet') renderDiet();
+  });
   const saved = todayMealPlan();
   const saveMeals = async (meals) => {
-    const r = rebalance(meals, plan.macros);
+    const r = rebalance(meals, plan.macros, saved.extras || []);
     await store.add({ ...saved, meals: r.meals, note: r.note, target: plan.target, macros: plan.macros });
     mp.editing = null;
     if (route === 'diet') renderDiet();
@@ -876,7 +1189,7 @@ function bindMealCard(plan, prof) {
     let r;
     try {
       if (!getGeminiKey()) throw new Error('NO_KEY');
-      const raw = await generateMealPlan({ ...args, target: plan.target, goalLabel: plan.goal.label, trainingToday: mp.train, foods: Object.keys(FOODS) });
+      const raw = await generateMealPlan({ ...args, target: plan.target, goalLabel: plan.goal.label, trainingToday: plan.dayType ? plan.dayType === 'train' : true, foods: Object.keys(FOODS) });
       r = sanitizeMealPlan(raw, plan.macros, mp.mealCount);
     } catch (e) {
       if (e.message !== 'NO_KEY') toast('AI 排菜單失敗，改用本機規則', 3000);
@@ -884,18 +1197,72 @@ function bindMealCard(plan, prof) {
     }
     mp.loading = false;
     if ((prof.mealPrefs || '') !== mp.prefs) await store.add({ id: 'profile', type: 'profile', date: '1900-01-01', ...prof, mealPrefs: mp.prefs });
-    await store.add({ id: `meal-${todayStr()}`, type: 'mealplan', date: todayStr(), target: plan.target, macros: plan.macros, meals: r.meals, tips: r.tips, source: r.source });
+    const extras = todayMealPlan()?.extras || [];
+    const rb = extras.length ? rebalance(r.meals, plan.macros, extras) : { meals: r.meals, note: '' };
+    await store.add({ id: `meal-${todayStr()}`, type: 'mealplan', date: todayStr(), target: plan.target, macros: plan.macros, meals: rb.meals, extras, note: rb.note, tips: r.tips, source: r.source });
     toast('今天的菜單排好了 🍱');
     if (route === 'diet') renderDiet();
   };
 }
 
+// ---- 每週回顧 ----
+let reviewBusy = false, autoReview = false;
+function latestReview() { return store.workouts.filter((w) => w.type === 'review').sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0))[0] || null; }
+function reviewDue() {
+  const today = todayStr(), dow = new Date().getDay();
+  const last = latestReview();
+  const trained = store.workouts.some((w) => (w.type === 'strength' || w.type === 'cardio') && w.date >= addDays(today, -6));
+  return (dow === 0 || dow === 1) && trained && (!last || last.date < addDays(today, -2));
+}
+function reviewCardHTML() {
+  const r = latestReview();
+  const list = (icon, xs) => xs && xs.length ? `<ul class="cues">${xs.map((x) => `<li>${icon} ${esc(x)}</li>`).join('')}</ul>` : '';
+  if (reviewBusy) return `<div class="card review"><h3>📋 每週回顧</h3><div class="center"><div class="spinner"></div><p class="muted small">${getGeminiKey() ? 'Gemini 正在看你這週的紀錄' : '整理中'}…</p></div></div>`;
+  if (!r) return `<div class="card review"><h3>📋 每週回顧</h3><p class="muted small">把最近 7 天的訓練、體重、飲食放在一起看，告訴你哪裡做得好、下週要調整什麼。</p><button class="btn primary block" id="rv-gen">產生這週的回顧</button></div>`;
+  return `<div class="card review"><div class="row"><h3 class="grow">📋 每週回顧</h3><span class="muted small">${r.from.slice(5).replace('-', '/')}–${r.to.slice(5).replace('-', '/')}・${r.source === 'gemini' ? 'Gemini' : '本機'}</span></div>
+    <p>${esc(r.summary || '')}</p>
+    ${r.good?.length ? `<div class="rv-h ok">做得好</div>${list('✅', r.good)}` : ''}
+    ${r.improve?.length ? `<div class="rv-h warn">要注意</div>${list('⚠️', r.improve)}` : ''}
+    ${r.actions?.length ? `<div class="rv-h">下週這樣做</div>${list('👉', r.actions)}` : ''}
+    <button class="btn ghost small mt" id="rv-gen">🔄 重新產生（用最新紀錄）</button></div>`;
+}
+async function runReview() {
+  if (reviewBusy) return;
+  reviewBusy = true; if (route === 'stats') renderStats();
+  const today = todayStr();
+  const d = weeklyData(store.workouts, today);
+  const local = localReview(d);
+  let r = local, source = 'local';
+  try {
+    if (getGeminiKey()) {
+      const localText = [`總結：${local.summary}`, ...local.good.map((x) => `好：${x}`), ...local.improve.map((x) => `注意：${x}`), ...local.actions.map((x) => `建議：${x}`)].join('\n');
+      const g = await generateWeeklyReview({ dataText: reviewDataText(d), localText });
+      if (g && g.summary) { r = { summary: g.summary, good: (g.good || []).slice(0, 4), improve: (g.improve || []).slice(0, 5), actions: (g.actions || []).slice(0, 4) }; source = 'gemini'; }
+    }
+  } catch (e) { console.error(e); toast('Gemini 失敗，改用本機回顧：' + e.message, 4000); }
+  reviewBusy = false;
+  await store.add({ id: `review-${today}`, type: 'review', date: today, from: d.from, to: d.to, source, ...r });
+  if (route === 'stats') renderStats();
+}
+function muscleCardHTML() {
+  const rows = muscleReport(store.workouts, todayStr());
+  if (!rows.some((x) => x.sets || x.avg4)) return '';
+  const MAX = 24, pct = (n) => Math.min(100, (n / MAX) * 100);
+  const word = { low: '不足', ok: '剛好', high: '偏多', none: '' };
+  return `<div class="card"><h3>💪 最近 7 天各肌群組數</h3>
+    <p class="muted small">只算正式組（排除熱身組）。建議每週：胸、背、腿 10-20 組；肩、二頭、三頭 6-14 組。二頭、三頭會把背、胸的複合動作算一半。${muscleReport(store.workouts, todayStr()).length && (() => { const n = store.workouts.filter((w) => w.type === 'strength' && w.date >= addDays(todayStr(), -6)).length; return n < 3 ? `這 7 天只練了 ${n} 次，三分化還沒跑完一輪，數字會偏低。` : ''; })()}</p>
+    ${rows.map((x) => `<div class="mus-row"><span class="mus-name">${esc(x.label)}</span>
+      <div class="mus-bar">${x.target ? `<i class="zone" style="left:${pct(x.target[0])}%;width:${pct(x.target[1]) - pct(x.target[0])}%"></i>` : ''}<b class="${x.status}" style="width:${pct(x.sets)}%"></b></div>
+      <span class="mus-n ${x.status}">${x.sets} 組${word[x.status] ? `<small>${word[x.status]}</small>` : ''}</span></div>
+      <div class="mus-sub">${x.indirect ? `直接 ${x.direct} 組 + 複合動作 ${x.indirect} 組・` : ''}4 週平均每週 ${x.avg4} 組</div>`).join('')}
+  </div>`;
+}
 function renderStats() {
   setTitle('表現');
   const ws = store.workouts.filter((w) => w.type === 'strength');
   const series = BIG_THREE.map((name, i) => {
     const byDate = new Map();
-    ws.forEach((w) => w.exercises.forEach((e) => { if (e.name === name && e.e1rm) byDate.set(w.date, Math.max(byDate.get(w.date) || 0, e.e1rm)); }));
+    ws.forEach((w) => w.exercises.forEach((e) => { if (e.name === name && e.e1rm && !e.deload) byDate.set(w.date, Math.max(byDate.get(w.date) || 0, e.e1rm)); }));
     return { name, color: SERIES_COLORS[i], points: [...byDate.entries()].map(([x, y]) => ({ x, y })) };
   });
   const best = series.map((s) => s.points.length ? Math.max(...s.points.map((p) => p.y)) : 0);
@@ -904,9 +1271,10 @@ function renderStats() {
 
   // 所有有重量的動作 → 目前最佳估算 1RM
   const bestAll = new Map();
-  ws.forEach((w) => w.exercises.forEach((e) => { if (e.e1rm) { const cur = bestAll.get(e.name); if (!cur || e.e1rm > cur.v) bestAll.set(e.name, { v: e.e1rm, d: w.date, w: e.weight, r: e.reps }); } }));
+  ws.forEach((w) => w.exercises.forEach((e) => { if (e.e1rm && !e.deload) { const cur = bestAll.get(e.name); if (!cur || e.e1rm > cur.v) bestAll.set(e.name, { v: e.e1rm, d: w.date, w: e.weight, r: e.reps }); } }));
 
   $view.innerHTML = h`
+    ${reviewCardHTML()}
     <div class="stat-tiles">
       ${series.map((s, i) => `<div class="tile"><div class="v" style="color:${s.color}">${latest[i] || '-'}</div><div class="k">${esc(s.name)}<br>最新估 1RM</div></div>`).join('')}
     </div>
@@ -914,8 +1282,10 @@ function renderStats() {
       <div class="row"><h3 class="grow">三大項估算 1RM 趨勢（kg）</h3><span class="muted small">總和 ${Math.round(total)}</span></div>
       <div class="chart-box">${lineChartSVG(series)}</div>
       <div class="legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)} 最佳 ${best[series.indexOf(s)] || '-'}</span>`).join('')}</div>
-      <p class="muted small mt">估算公式：Epley，1RM = 重量 × (1 + 次數 ÷ 30)。同一天多次取最高。</p>
+      <p class="muted small mt">估算公式：Epley，1RM = 重量 × (1 + 次數 ÷ 30)。同一天多次取最高；減量的那幾次不算。</p>
     </div>
+    ${muscleCardHTML()}
+    ${(() => { const a = deloadAdvice(store.workouts, todayStr()); return a.stalled.length ? `<div class="card deload"><h3>⚠️ 停滯中的動作</h3><p class="muted small">連續 3 次「最好的一組」和「總量」都沒超過之前。下次練到會自動減量一次，再回到原本重量。</p>${a.stalled.map((x) => `<div class="history-item"><div><div class="t">${esc(x.name)}</div><div class="d">上次突破 ${x.prDate}</div></div><div class="muted small">連續 ${x.since} 次</div></div>`).join('')}</div>` : ''; })()}
     <div class="card">
       <h3>各動作最佳估算 1RM</h3>
       ${bestAll.size ? [...bestAll.entries()].sort((a, b) => b[1].v - a[1].v).map(([n, x]) => `<div class="history-item"><div><div class="t">${esc(n)}</div><div class="d">${x.d}・${x.w} kg × ${x.r}</div></div><div style="font-weight:800">${x.v} kg</div></div>`).join('') : '<p class="muted">還沒有有重量的紀錄。</p>'}
@@ -925,6 +1295,8 @@ function renderStats() {
       ${trainings().length ? trainings().map(historyRow).join('') : '<p class="muted">無</p>'}
     </div>`;
   bindHistoryRows();
+  q('#rv-gen') && (q('#rv-gen').onclick = () => runReview());
+  if (autoReview) { autoReview = false; runReview(); }
 }
 
 // ================= 設定 =================
@@ -934,7 +1306,7 @@ function renderSettings() {
   $body.innerHTML = h`
     <div class="card">
       <h3>Gemini API</h3>
-      <p class="muted small">Key 只存在這支手機的瀏覽器裡，不會上傳到 Firebase。到 <code>aistudio.google.com/apikey</code> 取得，開頭通常是 <code>AIza</code>。</p>
+      <p class="muted small">到 <code>aistudio.google.com/apikey</code> 取得，開頭通常是 <code>AIza</code>。${store.user ? '已登入 Google：key 會存到你自己的雲端資料（只有你讀得到），其他裝置登入後自動帶入，不用再貼。' : '登入 Google 後，key 會同步到其他裝置。'}</p>
       <label class="field"><span>API key</span><input type="password" id="gkey" value="${esc(getGeminiKey())}" placeholder="AIza..."></label>
       <label class="field"><span>模型</span><input type="text" id="gmodel" value="${esc(getGeminiModel())}" placeholder="${GEMINI_DEFAULT_MODEL}"></label>
       <div class="row"><button class="btn primary grow" id="savekey">儲存</button><button class="btn" id="testkey">測試連線</button></div>
@@ -945,8 +1317,42 @@ function renderSettings() {
       ${store.mode === 'firebase'
         ? (store.user ? `<button class="btn block" id="logout">登出</button>` : `<button class="btn primary block" id="login">使用 Google 登入</button>`)
         : `<p class="muted small">要啟用同步，請把 Firebase 專案設定貼到 <code>js/config.js</code> 的 firebaseConfig（看 README）。</p>`}
+    </div>
+    <div class="card">
+      <h3>資料備份</h3>
+      <p class="muted small">把所有紀錄（訓練、體重、飲食、個人資料）下載成一個檔案，放到雲端硬碟或電腦。還原時同一筆會被覆蓋，其他的保留。檔案裡不含 API key。</p>
+      <div class="row" style="gap:8px"><button class="btn grow" id="export">⬇️ 下載備份</button><button class="btn grow" id="import">⬆️ 從備份還原</button></div>
+      <input type="file" id="import-file" accept=".json,application/json" hidden>
     </div>`;
-  q('#savekey').onclick = () => { setGeminiKey(q('#gkey').value); setGeminiModel(q('#gmodel').value); toast('已儲存'); };
+  q('#export').onclick = () => {
+    const records = store.workouts.filter((w) => w.type !== 'settings');
+    const blob = new Blob([JSON.stringify({ app: 'fitapp', version: 1, exportedAt: new Date().toISOString(), records }, null, 1)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `健身備份-${todayStr()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast(`已下載 ${records.length} 筆紀錄`);
+  };
+  q('#import').onclick = () => q('#import-file').click();
+  q('#import-file').onchange = async (ev) => {
+    const f = ev.target.files[0]; ev.target.value = '';
+    if (!f) return;
+    let records;
+    try { const j = JSON.parse(await f.text()); records = Array.isArray(j) ? j : j.records; if (!Array.isArray(records)) throw new Error('格式不對'); }
+    catch (e) { toast('讀不到備份檔：' + e.message, 4000); return; }
+    records = records.filter((r) => r && r.id && r.type && r.type !== 'settings');
+    if (!records.length) { toast('備份檔裡沒有紀錄'); return; }
+    const dup = records.filter((r) => store.workouts.some((w) => w.id === r.id)).length;
+    if (!confirm(`還原 ${records.length} 筆紀錄？${dup ? `其中 ${dup} 筆和現在的重複，會用備份覆蓋。` : ''}`)) return;
+    toast('還原中…');
+    let n = 0;
+    for (const r of records) { try { await store.add(r, { keepCreatedAt: true }); n++; } catch (e) { console.error(e); } }
+    toast(`已還原 ${n} 筆`, 3000);
+  };
+  q('#savekey').onclick = async () => {
+    setGeminiKey(q('#gkey').value); setGeminiModel(q('#gmodel').value);
+    try { toast((await pushGeminiKey()) ? '已儲存，也同步到雲端 ☁️' : '已儲存'); } catch (e) { toast('已存在這台，雲端同步失敗：' + e.message, 4000); }
+  };
   q('#testkey').onclick = async () => {
     setGeminiKey(q('#gkey').value); setGeminiModel(q('#gmodel').value);
     toast('測試中…');

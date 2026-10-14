@@ -42,8 +42,8 @@ export const store = {
   },
   async signOut() { if (state.mode === 'firebase') await state.fb.authMod.signOut(state.fb.auth); },
 
-  async add(workout) {
-    const w = { ...workout, id: workout.id || uid(), createdAt: Date.now() };
+  async add(workout, { keepCreatedAt = false } = {}) {
+    const w = { ...workout, id: workout.id || uid(), createdAt: keepCreatedAt && workout.createdAt ? workout.createdAt : Date.now() };
     if (state.mode === 'firebase' && state.user) {
       const { doc, setDoc } = state.fb.fsMod;
       await setDoc(doc(state.fb.db, 'users', state.user.uid, 'workouts', w.id), w);

@@ -197,18 +197,31 @@ export function sanitizeMealPlan(r, macros, mealCount) {
 
 // ---------- 吃了多少 → 重新分配後面的餐 ----------
 // meal.eaten：'full' 照吃、'partial' 吃比較少（item.ate 是實際克數）、'skip' 沒吃；沒有 eaten 代表還沒吃
-export function eatenTotals(meals) {
+// meal.eaten 另外還有 'other'：這餐改吃了別的（實際吃的記在 extras）
+export function extrasTotals(extras = []) {
+  const t = { p: 0, f: 0, c: 0, kcal: 0 };
+  extras.forEach((x) => (x.items || []).forEach((it) => { t.p += +it.p || 0; t.f += +it.f || 0; t.c += +it.c || 0; t.kcal += +it.kcal || 0; }));
+  return { p: Math.round(t.p), f: Math.round(t.f), c: Math.round(t.c), kcal: Math.round(t.kcal) };
+}
+export function eatenTotals(meals, extras = []) {
   const done = meals.filter((m) => m.eaten).map((m) => ({
-    items: m.eaten === 'skip' ? [] : m.items.map((it) => ({ food: it.food, grams: m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams }))
+    items: ['skip', 'other'].includes(m.eaten) ? [] : m.items.map((it) => ({ food: it.food, grams: m.eaten === 'partial' ? (it.ate ?? it.grams) : it.grams }))
   }));
-  return totalsOf(done);
+  const a = totalsOf(done), b = extrasTotals(extras);
+  return { p: a.p + b.p, f: a.f + b.f, c: a.c + b.c, kcal: a.kcal + b.kcal };
 }
 // 依已經吃的量，把剩下還沒吃的餐調回目標（每樣營養素最多比原本多 50%、少 50%，避免一餐暴增）
-export function rebalance(meals, macros) {
+export function rebalance(meals, macros, extras = []) {
   const left = meals.filter((m) => !m.eaten);
   left.forEach((m) => m.items.forEach((it) => { if (it.base == null) it.base = it.grams; it.grams = it.base; }));
   if (!left.length) return { meals, note: '' };
-  const eaten = eatenTotals(meals);
+  // 還沒吃任何東西（例如只是切換練習日／休息日）：整天直接照新目標重排，不受 ±50% 限制
+  if (left.length === meals.length && !extras.length) {
+    fitToTarget(meals, macros);
+    meals.forEach((m) => m.items.forEach((it) => { it.base = it.grams; }));
+    return { meals, note: '' };
+  }
+  const eaten = eatenTotals(meals, extras);
   const baseT = totalsOf(left);
   const need = { protein: macros.protein - eaten.p, fat: macros.fat - eaten.f, carb: macros.carb - eaten.c };
   const cap = (v, b) => Math.min(b * 1.5, Math.max(b * 0.5, v));
@@ -220,5 +233,38 @@ export function rebalance(meals, macros) {
   if (Math.abs(diff) >= 30) note = diff > 0 ? `前面少吃了，後面的餐多加了約 ${diff} kcal（以蛋白質為優先）` : `前面吃多了，後面的餐減少了約 ${-diff} kcal`;
   const capped = need.protein > baseT.p * 1.5 || need.carb > baseT.c * 1.5;
   if (capped) note += (note ? '；' : '') + '差太多的部分不用硬補，一餐最多只加 50%，今天少一點沒關係';
+  const proj = { f: eaten.f + after.f };
+  if (proj.f > macros.fat + 10) note += (note ? '；' : '') + '今天脂肪已經偏高，後面的餐少油、別再吃炸的';
   return { meals, note };
 }
+
+// ---------- 自己煮（生重）/ 外食（手掌估法）----------
+// RAW：熟重 → 生重的倍數與名稱；沒列的視為生熟差不多（蛋、地瓜、蔬菜、水果、乳品、豆腐）
+const RAW = {
+  '雞胸肉': [1.33, '生'], '去皮雞腿肉': [1.33, '生'], '豬里肌': [1.33, '生'], '牛腱': [1.4, '生'],
+  '鮭魚': [1.25, '生'], '鯛魚片': [1.25, '生'], '蝦仁': [1.25, '生'],
+  '白飯': [1 / 2.3, '生米'], '糙米飯': [1 / 2.3, '生米'], '義大利麵（熟）': [1 / 2.4, '乾麵']
+};
+// HAND：[單位, 每單位約幾克（熟）]
+const HAND_BY_CAT = { protein: ['手掌', 100], carb: ['拳頭', 160], veg: ['拳頭', 100], fruit: ['拳頭', 150], fat: ['拇指', 10] };
+const HAND_SKIP = ['雞蛋', '乳清蛋白粉', '鮪魚罐頭（水煮）', '全麥吐司', '饅頭', '烏龍麵', '無調味堅果', '酪梨'];
+const half = (n) => Math.max(0.5, Math.round(n * 2) / 2);
+// 回傳 { main, sub }：main 是主要顯示（粗體），sub 是旁邊的小字
+export function portionText(food, grams, mode) {
+  const g = Math.round(grams);
+  const unit = unitText(food, grams);
+  if (mode === 'home') {
+    const r = RAW[food];
+    if (r) return { main: `${r[1]} ${Math.round((grams * r[0]) / 5) * 5} g`, sub: `熟 ${g} g` };
+    return { main: `${g} g`, sub: unit };
+  }
+  if (mode === 'out') {
+    const cat = FOODS[food]?.cat;
+    if (FOODS[food]?.unit && (HAND_SKIP.includes(food) || ['dairy'].includes(cat))) return { main: unit.replace('約 ', '') || `${g} g`, sub: `${g} g` };
+    const h = HAND_BY_CAT[cat];
+    if (h && !HAND_SKIP.includes(food)) return { main: `${half(grams / h[1])} 個${h[0]}`, sub: `約 ${g} g` };
+    return { main: `${g} g`, sub: unit };
+  }
+  return { main: `${g} g`, sub: unit };
+}
+export const HAND_GUIDE = '手掌＝手心大小、約 1 公分厚的熟肉魚（約 100 g）；拳頭＝握拳大小的飯麵或地瓜（約 160 g）；拇指＝一個大拇指大小的油或醬（約 1 湯匙）。';
