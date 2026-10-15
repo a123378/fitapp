@@ -11,7 +11,7 @@ export function setGeminiKey(k) { localStorage.setItem(KEY_STORAGE, (k || '').tr
 export function getGeminiModel() { return localStorage.getItem(MODEL_STORAGE) || GEMINI_DEFAULT_MODEL; }
 export function setGeminiModel(m) { localStorage.setItem(MODEL_STORAGE, (m || '').trim() || GEMINI_DEFAULT_MODEL); }
 
-async function callGemini(prompt, schema, extraParts = []) {
+async function callGemini(prompt, schema, extraParts = [], temperature = 0.7) {
   const key = getGeminiKey();
   if (!key) throw new Error('NO_KEY');
   const model = getGeminiModel();
@@ -19,7 +19,7 @@ async function callGemini(prompt, schema, extraParts = []) {
   const body = {
     contents: [{ role: 'user', parts: [{ text: prompt }, ...extraParts] }],
     generationConfig: {
-      temperature: 0.7,
+      temperature,
       responseMimeType: 'application/json',
       responseSchema: schema
     }
@@ -416,4 +416,28 @@ ${localText}
 - 每點 40 字以內，只根據上面的資料，不要編數字；資料不足就直說要多記錄。
 - 訓練、體重、飲食要一起看（例如減脂中力量掉很多 → 檢查熱量和蛋白質）。`;
   return callGemini(prompt, reviewSchema);
+}
+
+// ---------- 讀營養標示 ----------
+const labelSchema = {
+  type: 'OBJECT',
+  properties: {
+    isLabel: { type: 'BOOLEAN' },
+    name: { type: 'STRING' }, brand: { type: 'STRING' },
+    servingGrams: { type: 'NUMBER' }, unit: { type: 'STRING' }, servingsPerPack: { type: 'NUMBER' },
+    kcal: { type: 'NUMBER' }, protein: { type: 'NUMBER' }, fat: { type: 'NUMBER' }, carb: { type: 'NUMBER' },
+    barcode: { type: 'STRING' }, note: { type: 'STRING' }
+  },
+  required: ['isLabel', 'servingGrams', 'kcal', 'protein', 'fat', 'carb']
+};
+export async function readNutritionLabel({ base64, mime = 'image/jpeg', hint = '' }) {
+  const prompt = `讀這張台灣食品包裝的「營養標示」表，照表上的數字填，不要估算。用繁體中文。
+- 用「每一份量」那一欄：servingGrams = 每一份量的數字，unit = g 或 ml（公克 → g、毫升 → ml）；servingsPerPack = 「本包裝含 N 份」的 N。
+- kcal = 熱量（大卡），protein = 蛋白質，fat = 脂肪（總脂肪，不是飽和脂肪），carb = 碳水化合物（不是糖），都是「每份」的數字。
+- 如果表上只有「每 100 公克（毫升）」，servingGrams 填 100，數字用每 100 公克那欄，servingsPerPack 用「內容量 ÷ 100」（看不到就不填）。
+- name：照片裡看得到品名就填（例如「茶葉蛋」「無糖高纖豆漿」），brand：品牌（例如「統一」「7-11」），看不到就留空。
+- barcode：照片裡看得到條碼下方的數字就填，看不到留空。
+- 照片裡沒有營養標示時 isLabel = false，數字填 0，note 說明。字太模糊、不確定的數字在 note 提醒。
+${hint ? `使用者補充：${hint}` : ''}`;
+  return callGemini(prompt, labelSchema, [{ inline_data: { mime_type: mime, data: base64 } }], 0.1);
 }

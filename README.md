@@ -8,15 +8,30 @@
 fitapp/
 ├─ index.html          App 入口
 ├─ manifest.json       PWA 設定（安裝到手機桌面）
-├─ sw.js               Service Worker（離線快取）
+├─ sw.js               Service Worker（離線快取；新增 JS 檔要加進這裡）
 ├─ firestore.rules     Firestore 安全規則（貼到 Firebase Console）
+├─ firebase.json       Firebase Hosting 設定
+├─ deploy.bat          一鍵部署到 Firebase Hosting
+├─ backup.bat          一鍵備份到 GitHub（git add / commit / push）
 ├─ css/style.css
 ├─ js/
 │  ├─ app.js           畫面與流程
 │  ├─ config.js        ★ Firebase 設定、RM 範圍、組數規則、三大項名稱
-│  ├─ exercises.js     ★ 動作清單（Gemini 只會從這裡挑）
-│  ├─ gemini.js        Gemini API 呼叫 + 本機備援菜單
 │  ├─ store.js         Firestore / localStorage 資料層、1RM 公式
+│  ├─ gemini.js        Gemini API 呼叫（菜單、有氧、飲食、週回顧）+ 本機備援
+│  ├─ exercises.js     ★ 動作清單（Gemini 只會從這裡挑）
+│  ├─ split.js         三分化課表、每個動作的候選替換、熱身
+│  ├─ creators.js      創作者菜單彙整
+│  │  ├─ viyade.js         維亞德
+│  │  ├─ jinshicheng.js    金士程
+│  │  ├─ rrroy.js          RRRoy
+│  │  ├─ tanchengyi.js     谭成义
+│  │  └─ xunlianguaishou.js 訓練怪獸
+│  ├─ coaching.js      動作要點、訓練原則、示範影片
+│  ├─ progression.js   漸進超負荷、減量週、肌群報告
+│  ├─ review.js        每週回顧
+│  ├─ nutrition.js     體重、熱量與營養目標
+│  ├─ meals.js         食物庫、飲食計畫
 │  ├─ timer.js         間歇計時器、碼表、嗶聲、震動、螢幕常亮
 │  └─ chart.js         SVG 趨勢圖
 └─ icons/
