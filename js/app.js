@@ -1,7 +1,7 @@
 import { GOALS, LOCATIONS, MUSCLE_GROUPS, BIG_THREE, CARDIO_MODES, CARDIO_TYPES, GEMINI_DEFAULT_MODEL } from './config.js';
 import { store, estimate1RM, todayStr } from './store.js';
-import { generateSplitMenu, generateStrengthMenu, fallbackStrengthMenu, generateCardioPlan, fallbackCardioPlan, getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, generateMealPlan, analyzeFoodPhoto, generateWeeklyReview, readNutritionLabel } from './gemini.js';
-import { SLOTS, SLOT_LABEL, slotOfMeal, slotOfEntry, dayDiary, planMealItems, sumItems, cleanItem, amountText, scaleItem, foodsOf, searchFoods, portion, foodFromLabel, foodFromOFF, newId, fmtQty } from './diary.js';
+import { generateSplitMenu, generateStrengthMenu, fallbackStrengthMenu, generateCardioPlan, fallbackCardioPlan, getGeminiKey, setGeminiKey, getGeminiModel, setGeminiModel, generateMealPlan, analyzeFoodPhoto, generateWeeklyReview, readNutritionLabel, readFoodList, estimateFood } from './gemini.js';
+import { SLOTS, SLOT_LABEL, slotOfMeal, slotOfEntry, dayDiary, planMealItems, sumItems, cleanItem, amountText, scaleItem, foodsOf, searchFoods, portion, foodFromLabel, foodFromOFF, newId, fmtQty, loadTfnd, foodsFromList } from './diary.js';
 import { weeklyData, localReview, reviewDataText } from './review.js';
 import { FOODS, localMealPlan, sanitizeMealPlan, totalsOf, unitText, rebalance, eatenTotals, extrasTotals, portionText, HAND_GUIDE } from './meals.js';
 import { IntervalTimer, Stopwatch, Countdown, fmtClock, beep } from './timer.js';
@@ -997,7 +997,7 @@ function renderDiet() {
 }
 
 // ---------- 飲食日記（早餐 / 午餐 / 晚餐 / 點心） ----------
-const df = { date: null, adding: null, q: '', pick: null, newFood: null, draft: null, busy: '', edit: null, hint: '', pendingBarcode: '' };
+const df = { date: null, adding: null, q: '', pick: null, newFood: null, draft: null, busy: '', edit: null, hint: '', pendingBarcode: '', importing: null };
 const r1 = (n) => Math.round((+n || 0) * 10) / 10;
 function nowHM() { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
 function dayKey() { return df.date || todayStr(); }
@@ -1207,6 +1207,7 @@ function renderFoodAdd(plan) {
   const s = df.adding, label = SLOT_LABEL[s], date = dayKey();
   let body;
   if (df.busy) body = `<div class="card center"><div class="spinner"></div><p class="muted">${esc(df.busy)}</p></div>`;
+  else if (df.importing) body = importHTML();
   else if (df.pick) body = pickerHTML(label);
   else if (df.newFood) body = newFoodHTML();
   else if (df.draft) body = draftHTML();
@@ -1222,12 +1223,14 @@ function renderFoodAdd(plan) {
     <input type="text" id="fa-hint" class="fa-hint" value="${esc(df.hint)}" placeholder="拍照補充說明（選填）：飯只吃一半、飲料無糖…">
     <input type="file" id="fa-label-file" accept="image/*" capture="environment" hidden>
     <input type="file" id="fa-photo-file" accept="image/*" capture="environment" hidden>
-    ${getGeminiKey() ? '' : '<p class="muted small">拍營養標示、拍一餐估算要先在 ⚙️ 設定填 Gemini API key；掃條碼、自己輸入不用。</p>'}
-    <div id="fa-results"></div>`;
+    ${getGeminiKey() ? '' : '<p class="muted small">拍營養標示、拍一餐估算、AI 估算要先在設定填 Gemini API key；掃條碼、自己輸入不用。</p>'}
+    <div id="fa-results"></div>
+    <button class="btn ghost block mt" id="fa-import">📥 從 FatSecret 截圖匯入常吃的食物</button>`;
   $view.innerHTML = h`<button class="btn ghost mb" id="fa-back">← 回飲食日記</button>
     <h2>加到${esc(label)}${date !== todayStr() ? ` <span class="muted small">${esc(dateLabel(date))}</span>` : ''}</h2>${body}`;
-  q('#fa-back').onclick = () => { Object.assign(df, { adding: null, pick: null, newFood: null, draft: null, pendingBarcode: '' }); renderDiet(); };
+  q('#fa-back').onclick = () => { Object.assign(df, { adding: null, pick: null, newFood: null, draft: null, pendingBarcode: '', importing: null }); renderDiet(); };
   if (df.busy) return;
+  if (df.importing) return bindImport();
   if (df.pick) return bindPicker();
   if (df.newFood) return bindNewFood();
   if (df.draft) return bindDraft();
@@ -1242,7 +1245,21 @@ function bindSearch() {
       const d = x.kind === 'combo' ? `組合・${x.items.length} 樣・蛋白 ${sumItems(x.items).p}` : `${x.builtin ? '每 100 g' : x.servingGrams ? `1 份 ${x.servingGrams} ${x.unit || 'g'}` : '1 份'}・蛋白 ${r1(x.per?.p)}・脂 ${r1(x.per?.f)}・碳 ${r1(x.per?.c)}`;
       const kcal = x.kind === 'combo' ? sumItems(x.items).kcal : Math.round(x.per?.kcal || 0);
       return `<div class="food-row" data-res="${sec.key}:${i}"><div class="grow"><div class="t">${x.kind === 'combo' ? '⭐ ' : ''}${esc(x.name)}${x.brand ? ` <span class="muted small">${esc(x.brand)}</span>` : ''}</div><div class="d">${esc(d)}</div></div><b>${kcal}</b></div>`;
-    }).join('')).join('') || `<p class="muted small mt">${df.q ? `我的食物裡沒有「${esc(df.q)}」。包裝食品拍營養標示最準，存一次之後就搜得到。` : '記過的食物會出現在這裡，常吃的排前面。包裝食品拍營養標示最準；7-11 這類常吃的記一次就好。'}</p>`;
+    }).join('')).join('') + (df.q.trim() ? `${res.sections.length ? '' : `<p class="muted small mt">我的食物和衛福部資料庫裡都找不到「${esc(df.q.trim())}」。包裝食品拍營養標示最準。</p>`}<button class="btn ghost block mt" id="fa-ai">🤖 ${res.sections.length ? '都不對？' : ''}用 AI 估「${esc(df.q.trim())}」</button>` : '') || `<p class="muted small mt">記過的食物會出現在這裡，常吃的排前面。打字可以搜尋我的食物和衛福部 2,000 多種食材；包裝食品拍營養標示最準。</p>`;
+    const ai = q('#fa-ai', $r);
+    if (ai) ai.onclick = async () => {
+      if (!getGeminiKey()) { toast('要先在設定填 Gemini API key'); return; }
+      const query = df.q.trim();
+      df.busy = `AI 正在估「${query}」…`; rerenderDiet();
+      try {
+        const r = await estimateFood({ query });
+        const unit = /ml|毫升|cc/i.test(r.unit || '') ? 'ml' : 'g';
+        df.newFood = { name: r.name || query, brand: r.brand || '', servingGrams: +r.servingGrams || null, unit, servingsPerPack: null,
+          per: { kcal: Math.round(+r.kcal || 0), p: r1(r.protein), f: r1(r.fat), c: r1(r.carb) }, barcode: '', source: 'ai',
+          fromAI: true, note: `${r.servingDesc ? `一份 = ${r.servingDesc}。` : ''}${r.note || ''}`, confidence: r.confidence || '' };
+      } catch (e) { toast('AI 估算失敗：' + e.message.slice(0, 80), 5000); }
+      df.busy = ''; rerenderDiet();
+    };
     qa('[data-res]', $r).forEach((el) => el.onclick = () => {
       const [k, i] = el.dataset.res.split(':');
       const x = res.sections.find((sec) => sec.key === k).items[Number(i)];
@@ -1254,6 +1271,8 @@ function bindSearch() {
   $q.oninput = () => { df.q = $q.value; draw(); };
   q('#fa-hint').oninput = (e) => { df.hint = e.target.value; };
   draw();
+  loadTfnd().then(() => { if (df.q.trim() && route === 'diet' && q('#fa-results')) draw(); }).catch(() => {});
+  q('#fa-import').onclick = () => { df.importing = { items: [], busy: '' }; rerenderDiet(); };
   const needKey = () => { if (getGeminiKey()) return false; toast('要先在 ⚙️ 設定填 Gemini API key'); return true; };
   const lf = q('#fa-label-file'), pf = q('#fa-photo-file');
   q('#fa-label').onclick = () => { if (!needKey()) lf.click(); };
@@ -1307,7 +1326,7 @@ function pickerHTML(label) {
     ? [0.5, 1, 1.5, 2, ...(food.servingsPerPack && ![0.5, 1, 1.5, 2].includes(food.servingsPerPack) ? [food.servingsPerPack] : [])]
     : food.builtin ? [...new Set([50, 100, 150, 200, ...(food.unitHint ? [food.unitHint[1]] : [])])].sort((a, b) => a - b) : [sg / 2, sg, sg * 2];
   const qLabel = (v) => mode === 'serving' ? (food.servingsPerPack === v && v !== 1 ? `整包 ${fmtQty(v)} 份` : `${fmtQty(v)} 份`) : `${Math.round(v)} ${u}${food.unitHint && v === food.unitHint[1] ? `（1 ${food.unitHint[0]}）` : ''}`;
-  const info = [food.brand, food.builtin ? `每 100 ${u}（煮熟）` : sg ? `1 份 = ${sg} ${u}` : '', food.servingsPerPack ? `一包 ${fmtQty(food.servingsPerPack)} 份` : '', food.barcode ? `▦ ${food.barcode}` : ''].filter(Boolean);
+  const info = [food.brand, food.tfnd ? `衛福部資料庫・${food.cat}・每 100 ${u}` : food.builtin ? `每 100 ${u}（煮熟）` : sg ? `1 份 = ${sg} ${u}` : '', food.alias ? `又叫 ${food.alias}` : '', food.servingsPerPack ? `一包 ${fmtQty(food.servingsPerPack)} 份` : '', food.barcode ? `▦ ${food.barcode}` : ''].filter(Boolean);
   return `<div class="card"><h3>${esc(food.name)}</h3>
     ${info.length ? `<p class="muted small">${info.map(esc).join('・')}</p>` : ''}
     <div class="pk-row"><input type="number" inputmode="decimal" step="${mode === 'serving' ? 0.5 : 1}" id="pk-qty" class="pk-qty" value="${qty}">
@@ -1343,6 +1362,7 @@ function bindPicker() {
 function newFoodHTML() {
   const f = df.newFood, per = f.per || {};
   return `<div class="card"><h3>${f.id ? '修改食物' : '新增到我的食物'}</h3>
+    ${f.fromAI ? `<p class="small warn-text">🤖 這是 AI 估計值（可信度：${esc(f.confidence || '不確定')}）。${esc(f.note || '')} 有包裝的話，以營養標示為準。</p>` : ''}
     ${f.fromLabel ? `<p class="muted small">已從營養標示讀出來，對一下數字和名稱再存。${f.note ? `<br>💬 ${esc(f.note)}` : ''}</p>` : f.fromOFF ? '<p class="muted small">在 Open Food Facts 找到這個條碼。資料是網友填的，對一下包裝再存。</p>' : '<p class="muted small">照包裝上的營養標示填「每一份」的數字；沒有包裝的估個大概也行。</p>'}
     <label class="field"><span>名稱</span><input type="text" id="nf-name" value="${esc(f.name || '')}" placeholder="例如：茶葉蛋（無蛋黃）"></label>
     <label class="field"><span>品牌／店家（選填）</span><input type="text" id="nf-brand" value="${esc(f.brand || '')}" placeholder="例如：7-11"></label>
@@ -1383,6 +1403,68 @@ function bindNewFood() {
     toast(f.id ? '已更新' : '已存到我的食物');
     rerenderDiet();
   };
+}
+// ---------- 從 FatSecret 截圖匯入「我的食物」 ----------
+function importHTML() {
+  const im = df.importing;
+  const have = new Set(foodsOf(store.workouts).map((f) => `${f.brand || ''}|${f.name}`));
+  const rows = im.items.map((f, i) => {
+    const dup = have.has(`${f.brand || ''}|${f.name}`);
+    return `<label class="im-row ${dup ? 'dup' : ''}"><input type="checkbox" data-im="${i}" ${f.checked ? 'checked' : ''}>
+      <span class="grow"><b>${esc(f.name)}</b>${f.brand ? ` <span class="muted small">${esc(f.brand)}</span>` : ''}${dup ? ' <span class="pill">已經有了</span>' : ''}
+      <span class="d">1 份${f.servingGrams ? `（${f.servingGrams} ${esc(f.unit)}）` : ''}・蛋白 ${f.per.p}・脂 ${f.per.f}・碳 ${f.per.c}</span></span>
+      <b class="im-k">${Math.round(f.per.kcal)}</b></label>`;
+  }).join('');
+  const n = im.items.filter((f) => f.checked).length;
+  return `<div class="card"><h3>從 FatSecret 截圖匯入</h3>
+    <p class="muted small">在 FatSecret 的「日記」頁截圖，可以一次選很多張。App 會讀出每一樣食物，換算成「1 份」的營養，你勾選要的就存進「我的食物」，之後搜尋就有。只存食物資料，不會把那天吃的東西加進日記。</p>
+    ${im.busy ? `<div class="center"><div class="spinner"></div><p class="muted small">${esc(im.busy)}</p></div>`
+      : im.items.length ? `<div class="im-list">${rows}</div>
+        <div class="row mt" style="gap:8px;flex-wrap:wrap"><button class="btn primary grow" id="im-save" ${n ? '' : 'disabled'}>存 ${n} 樣到我的食物</button><button class="btn" id="im-more">再加截圖</button></div>`
+      : `<button class="btn primary block" id="im-pick">選擇截圖</button>`}
+    <input type="file" id="im-file" accept="image/*" multiple hidden>
+    <button class="btn ghost block mt" id="im-cancel">取消</button></div>`;
+}
+function bindImport() {
+  const im = df.importing;
+  const file = q('#im-file');
+  const pick = () => { if (!getGeminiKey()) { toast('要先在設定填 Gemini API key'); return; } file.click(); };
+  q('#im-pick') && (q('#im-pick').onclick = pick);
+  q('#im-more') && (q('#im-more').onclick = pick);
+  q('#im-cancel').onclick = () => { df.importing = null; rerenderDiet(); };
+  qa('[data-im]').forEach((c) => c.onchange = () => { im.items[Number(c.dataset.im)].checked = c.checked; rerenderDiet(); });
+  file.onchange = async () => {
+    const files = [...file.files]; if (!files.length) return;
+    const have = new Set(foodsOf(store.workouts).map((f) => `${f.brand || ''}|${f.name}`));
+    let added = 0, failed = 0;
+    for (let i = 0; i < files.length; i++) {
+      im.busy = `Gemini 正在讀第 ${i + 1} / ${files.length} 張截圖…`; rerenderDiet();
+      try {
+        const big = await fileToJpeg(files[i], 1600);
+        const r = await readFoodList({ base64: big.split(',')[1] });
+        for (const f of foodsFromList(r.items)) {
+          const k = `${f.brand}|${f.name}`;
+          if (im.items.some((x) => `${x.brand}|${x.name}` === k)) continue;
+          im.items.push({ ...f, checked: !have.has(k) }); added++;
+        }
+      } catch (e) { console.error(e); failed++; }
+    }
+    im.busy = '';
+    toast(`讀到 ${added} 樣${failed ? `，${failed} 張讀取失敗` : ''}`, 3000);
+    rerenderDiet();
+  };
+  q('#im-save') && (q('#im-save').onclick = async () => {
+    const sel = im.items.filter((f) => f.checked);
+    im.busy = `存進我的食物…`; rerenderDiet();
+    const now = Date.now();
+    for (let i = 0; i < sel.length; i++) {
+      const { checked, servingDesc, ...f } = sel[i];
+      await store.add({ ...f, id: newId('food'), type: 'food', uses: 0, lastUsed: now - i }, { keepCreatedAt: true });
+    }
+    df.importing = null;
+    toast(`已存 ${sel.length} 樣到我的食物 📥 搜尋就找得到`, 3500);
+    rerenderDiet();
+  });
 }
 // 拍一餐估算（多樣食物、可逐項改）
 function draftHTML() {

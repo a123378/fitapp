@@ -95,6 +95,31 @@ export function builtinFoods() {
     per: { kcal: Math.round(f.p * 4 + f.f * 9 + f.c * 4), p: f.p, f: f.f, c: f.c }, unitHint: f.unit || null
   }));
 }
+// ---- 衛福部食品營養成分資料庫（data/tfnd.json，每 100 g，第一次搜尋才載入）----
+let TFND = null, tfndLoading = null;
+export function tfndFoods() { return TFND || []; }
+export function loadTfnd() {
+  if (TFND) return Promise.resolve(TFND);
+  if (!tfndLoading) tfndLoading = fetch('data/tfnd.json').then((r) => r.json()).then((j) => {
+    TFND = j.rows.map((r, i) => ({
+      id: `tfnd:${i}`, builtin: true, tfnd: true, kind: 'food',
+      name: r[3] ? `${r[0]}（${r[3]}）` : r[0], alias: r[1], cat: j.cats[r[2]] || '', servingGrams: 100, unit: 'g',
+      per: { kcal: r[4], p: r[5], f: r[6], c: r[7] }, fiber: r[8], unitHint: r[9] ? ['份', r[9]] : null
+    }));
+    return TFND;
+  }).catch((e) => { tfndLoading = null; throw e; });
+  return tfndLoading;
+}
+function tfndSearch(qq, norm) {
+  if (!qq || !TFND) return [];
+  const scored = [];
+  for (const x of TFND) {
+    const n = norm(x.name), a = norm(x.alias);
+    const s = n.startsWith(qq) ? 0 : n.includes(qq) ? 1 : a.includes(qq) ? 2 : -1;
+    if (s >= 0) scored.push([s, n.length, x]);
+  }
+  return scored.sort((a, b) => a[0] - b[0] || a[1] - b[1]).slice(0, 40).map((s) => s[2]);
+}
 export function searchFoods(records, query) {
   const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
   const qq = norm(query);
@@ -106,7 +131,12 @@ export function searchFoods(records, query) {
   }
   mine.sort((a, b) => (b.uses || 0) - (a.uses || 0) || (b.lastUsed || 0) - (a.lastUsed || 0));
   const builtin = builtinFoods().filter(hit);
-  return { sections: [mine.length && { key: 'mine', title: '我的食物', items: mine.slice(0, 30) }, builtin.length && { key: 'builtin', title: '常見食材（每 100 g，煮熟）', items: builtin }].filter(Boolean) };
+  const tf = tfndSearch(qq, norm);
+  return { sections: [
+    mine.length && { key: 'mine', title: '我的食物', items: mine.slice(0, 30) },
+    builtin.length && { key: 'builtin', title: '常見食材（每 100 g，煮熟）', items: builtin },
+    tf.length && { key: 'tfnd', title: '衛福部食品營養資料庫（每 100 g）', items: tf }
+  ].filter(Boolean) };
 }
 // 吃了多少 → 一個日記項目；mode：serving 份 / gram 公克（毫升）
 export function portion(food, qty, mode) {
@@ -144,4 +174,23 @@ export function foodFromOFF(p, code) {
     per: { kcal: r1(per100.kcal * k), p: r1(per100.p * k), f: r1(per100.f * k), c: r1(per100.c * k) },
     barcode: code, source: 'off'
   };
+}
+
+// FatSecret 截圖讀出來的品項（整筆的量）→ 每份的食物
+export function foodsFromList(items) {
+  const out = [];
+  for (const it of items || []) {
+    const q = +it.quantity > 0 ? +it.quantity : 1;
+    if (!it.name || !(+it.kcal > 0)) continue;
+    const unit = /ml|毫升|cc/i.test(it.unit || '') ? 'ml' : 'g';
+    out.push({
+      name: String(it.name).trim(), brand: String(it.brand || '').trim(), unit,
+      servingGrams: +it.totalGrams > 0 ? r1(+it.totalGrams / q) : null, servingsPerPack: null,
+      per: { kcal: r1(+it.kcal / q), p: r1(+it.protein / q), f: r1(+it.fat / q), c: r1(+it.carb / q) },
+      servingDesc: String(it.servingDesc || ''), barcode: '', source: 'fatsecret'
+    });
+  }
+  // 同名同品牌只留一筆
+  const seen = new Set();
+  return out.filter((f) => { const k = `${f.brand}|${f.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }

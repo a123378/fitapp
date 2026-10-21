@@ -446,3 +446,53 @@ export async function readNutritionLabel({ base64, mime = 'image/jpeg', hint = '
 ${hint ? `使用者補充：${hint}` : ''}`;
   return callGemini(prompt, labelSchema, [{ inline_data: { mime_type: mime, data: base64 } }], 0.1);
 }
+
+// ---------- 從 FatSecret（或其他記錄 App）截圖讀出食物 ----------
+const foodListSchema = {
+  type: 'OBJECT',
+  properties: {
+    items: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          name: { type: 'STRING' }, brand: { type: 'STRING' }, quantity: { type: 'NUMBER' }, servingDesc: { type: 'STRING' },
+          totalGrams: { type: 'NUMBER' }, unit: { type: 'STRING' },
+          kcal: { type: 'NUMBER' }, protein: { type: 'NUMBER' }, fat: { type: 'NUMBER' }, carb: { type: 'NUMBER' }
+        },
+        required: ['name', 'quantity', 'kcal', 'protein', 'fat', 'carb']
+      }
+    },
+    note: { type: 'STRING' }
+  },
+  required: ['items']
+};
+export async function readFoodList({ base64, mime = 'image/jpeg' }) {
+  const prompt = `這是飲食記錄 App（例如 FatSecret）的畫面截圖，列出一筆一筆吃過的食物。把每一筆食物讀出來，只照畫面上的字，不要估算。
+- name：品名，去掉最前面的品牌或店名（例如「7-11 茶葉蛋（無蛋黃）」→ name「茶葉蛋（無蛋黃）」、brand「7-11」）。
+- quantity：吃了幾份。例如「4 x 1份 (151 克)」→ 4；「1份 (400毫升)」→ 1。
+- servingDesc：畫面上的份量文字原文。
+- totalGrams：這一筆總共的克數或毫升數（例如 151、400），看不到就填 0；unit：g 或 ml。
+- kcal、protein（蛋白質）、fat（脂肪）、carb（碳水）：這一筆畫面上顯示的數字（整筆的量，不是每份）。
+- 不要把「早餐 781 卡路里」這種整餐的合計當成一筆食物。看不清楚的那筆就跳過。`;
+  return callGemini(prompt, foodListSchema, [{ inline_data: { mime_type: mime, data: base64 } }], 0.1);
+}
+
+// ---------- 用名稱估算一樣食物 ----------
+const estimateSchema = {
+  type: 'OBJECT',
+  properties: {
+    name: { type: 'STRING' }, brand: { type: 'STRING' }, servingDesc: { type: 'STRING' }, servingGrams: { type: 'NUMBER' }, unit: { type: 'STRING' },
+    kcal: { type: 'NUMBER' }, protein: { type: 'NUMBER' }, fat: { type: 'NUMBER' }, carb: { type: 'NUMBER' },
+    confidence: { type: 'STRING' }, note: { type: 'STRING' }
+  },
+  required: ['name', 'servingGrams', 'kcal', 'protein', 'fat', 'carb', 'confidence']
+};
+export async function estimateFood({ query }) {
+  const prompt = `你是台灣的營養師。使用者想記錄這樣食物：「${query}」。估計「一份」的營養，用繁體中文。
+- 如果是台灣連鎖店或超商的商品（7-11、全家、麥當勞、八方雲集、五十嵐等），用你知道的官方營養標示或常見數字；不知道就用同類商品估。
+- servingDesc 說明一份是多少（例如「1 個便當」「10 顆」「大杯 700 ml」），servingGrams 是這一份的克數或毫升，unit 填 g 或 ml。
+- kcal、protein、fat、carb 是這一份的數字。
+- confidence：「高」（有官方標示）／「中」（常見數字）／「低」（純估計）。note 用一句話說依據或最不確定的地方。`;
+  return callGemini(prompt, estimateSchema, [], 0.2);
+}
