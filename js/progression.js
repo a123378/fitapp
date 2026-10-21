@@ -219,3 +219,13 @@ export function muscleReport(workouts, today) {
     return { key: k, label: PART_LABELS[k], sets: n, direct: now[k], indirect: INDIRECT[k] ? now[INDIRECT[k]] * 0.5 : 0, avg4: avg, target: t, status };
   }).filter((x) => x.target || x.sets);
 }
+
+// 各肌群每週組數（週一到週日），最近 n 週，舊到新；最後一週是這週（還沒過完）
+export function weeklyMuscleSeries(workouts, today, n = 12) {
+  const d = new Date(`${today}T00:00:00`); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  const mon = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const weeks = Array.from({ length: n }, (_, i) => addDays(mon, (i - n + 1) * 7));
+  const per = weeks.map((w) => muscleSets(workouts, w, addDays(w, 6)));
+  const data = Object.fromEntries(MUSCLE_ORDER.map((k) => [k, per.map((m) => Math.round((m[k] + (INDIRECT[k] ? m[INDIRECT[k]] * 0.5 : 0)) * 2) / 2)]));
+  return { weeks, data };
+}

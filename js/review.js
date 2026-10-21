@@ -2,6 +2,7 @@
 import { computePlan, trendAdvice, weightEntries } from './nutrition.js';
 import { eatenTotals } from './meals.js';
 import { exerciseHistory, deloadAdvice, muscleReport, addDays } from './progression.js';
+import { cycleWeek, trainPrefs } from './cycle.js';
 
 const r1 = (x) => Math.round(x * 10) / 10;
 const avg = (xs) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
@@ -44,7 +45,10 @@ export function weeklyData(records, today) {
     protein: Math.round(avg(days.map((x) => x.p))), proteinTarget: Math.round(avg(days.map((x) => x.pTarget)))
   } : null;
 
-  return { from, to: today, strength: strength.length, cardio: cardio.length, prevCount, progress, stalled: dl.stalled, deloadNeed: dl.need, streakWeeks: dl.weeks, muscles, weight, weighIns, nutrition };
+  const cw = cycleWeek(records, today);
+  const cycle = cw ? `${cw.label}${cw.phase === 'deload' ? '' : ` 第 ${cw.week} 週`}（${cw.note}）` : '';
+  const focus = trainPrefs(records).focus || [];
+  return { from, to: today, cycle, focus, strength: strength.length, cardio: cardio.length, prevCount, progress, stalled: dl.stalled, deloadNeed: dl.need, streakWeeks: dl.weeks, muscles, weight, weighIns, nutrition };
 }
 
 // 沒有 Gemini 時的本機規則
@@ -96,6 +100,8 @@ export function reviewDataText(d) {
     `期間：${d.from} ~ ${d.to}`,
     `訓練：重訓 ${d.strength} 次、有氧 ${d.cardio} 次（前一週共 ${d.prevCount} 次）；連續訓練 ${d.streakWeeks} 週沒減量`,
     `三分化：第一天胸 + 肩中束 + 三頭、第二天背 + 肩後束 + 二頭、第三天腿`,
+    `訓練週期：${d.cycle || '沒有使用'}${d.cycle && /減量/.test(d.cycle) ? '（這週本來就減量，重量和組數下降是正常的）' : ''}`,
+    `加強部位（每個動作 +1 組）：${d.focus.length ? d.focus.join('、') : '無'}`,
     `各動作：${d.progress.map((x) => `${x.name}［${{ pr: '破紀錄', same: '持平', down: '退步', new: '新動作' }[x.status]}］${x.text}`).join('；') || '無'}`,
     `停滯中（連續 3 次以上沒進步）：${d.stalled.map((x) => `${x.name} ${x.since} 次`).join('、') || '無'}`,
     `各肌群最近 7 天正式組數：${d.muscles.map((x) => `${x.label} ${x.sets} 組（建議 ${x.target ? x.target.join('-') : '無'}，4 週平均 ${x.avg4}）`).join('、')}`,

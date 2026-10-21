@@ -8,7 +8,12 @@ const MODEL_STORAGE = 'fitapp.geminiModel';
 
 export function getGeminiKey() { return localStorage.getItem(KEY_STORAGE) || ''; }
 export function setGeminiKey(k) { localStorage.setItem(KEY_STORAGE, (k || '').trim()); }
-export function getGeminiModel() { return localStorage.getItem(MODEL_STORAGE) || GEMINI_DEFAULT_MODEL; }
+// 以前存的舊預設模型（2.5 系列 Google 已限制新用戶）→ 自動換成現在的預設；自己填的其他模型照用
+const OLD_DEFAULT_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+export function getGeminiModel() {
+  const m = (localStorage.getItem(MODEL_STORAGE) || '').trim();
+  return !m || OLD_DEFAULT_MODELS.includes(m) ? GEMINI_DEFAULT_MODEL : m;
+}
 export function setGeminiModel(m) { localStorage.setItem(MODEL_STORAGE, (m || '').trim() || GEMINI_DEFAULT_MODEL); }
 
 async function callGemini(prompt, schema, extraParts = [], temperature = 0.7) {

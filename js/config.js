@@ -12,7 +12,7 @@ export const firebaseConfig = {
 
 // ===== Gemini 設定 =====
 // Gemini API key 不放在程式碼裡，改在 App 的「設定」頁面輸入，會存在手機本機。
-export const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
+export const GEMINI_DEFAULT_MODEL = "gemini-3.8-flash";
 
 // ===== 訓練參數 =====
 export const GOALS = {

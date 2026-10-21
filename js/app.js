@@ -9,7 +9,8 @@ import { lineChartSVG, SERIES_COLORS } from './chart.js';
 import { GOALS_BODY, DAILY_ACTIVITY, dayPlan, computePlan, trendAdvice, weightEntries, getProfile } from './nutrition.js';
 import { creatorMenusFor, PART_LABELS, CREATORS } from './creators.js';
 import { GROUP_CUES, PRINCIPLES, suggestNext, repRange, groupHistory, daysSince, AI_STATES, AI_MINUTES, tipsFor, cuesFor, generalCues, embedUrl } from './coaching.js';
-import { plannedSets, summarizeSets, formatSets, exerciseHistory, deloadTarget, activeDeloadWeek, deloadAdvice, addDays, DELOAD_DAYS, muscleReport } from './progression.js';
+import { plannedSets, summarizeSets, formatSets, exerciseHistory, deloadTarget, activeDeloadWeek, deloadAdvice, addDays, DELOAD_DAYS, muscleReport, weeklyMuscleSeries, MUSCLE_TARGETS } from './progression.js';
+import { CYCLE, cycleRecord, cycleWeek, planMods, trainPrefs, mondayOf } from './cycle.js';
 import { SPLIT_DAYS, CORE_SLOT, SPLIT_PLAN_VIDEO, WARMUPS, warmupForGroup, candidatesFor, nextSplitDay, lastSplit, splitProgress, lastSlotChoice } from './split.js';
 
 const $view = document.getElementById('view');
@@ -103,6 +104,18 @@ function updateBadge() {
 }
 
 // ================= 首頁 =================
+// 首頁最上面：下次輪到三分化第幾天（大數字）、週期階段、開始按鈕、這週練了幾次
+function heroHTML(ws, total, strength, cardio) {
+  const day = nextSplitDay(ws), cw = curCycle();
+  return `<section class="hero">
+    <div class="hero-top"><span>下次重訓</span><span>三分化・第 ${splitProgress(ws).round} 輪</span></div>
+    <div class="hero-main"><div class="hero-num" aria-label="第 ${day} 天">${day}</div>
+      <div><div class="hero-day">第 ${day} 天</div><div class="hero-parts">${esc(SPLIT_DAYS[day].short)}</div>${cw ? `<div class="hero-phase ${cw.phase}">${esc(cycleTitle(cw))}</div>` : ''}</div></div>
+    ${cw ? cycleBarHTML(cw) : ''}
+    <div class="hero-actions"><button class="btn primary big" id="go-strength">開始重訓</button><button class="btn big" id="go-cardio">有氧</button></div>
+    <div class="hero-week">這週練了 <b>${total}</b> 次${total ? `（重訓 <b>${strength}</b>、有氧 <b>${cardio}</b>）` : ''}</div>
+  </section>`;
+}
 function renderHome() {
   setTitle('我的健身');
   const ws = trainings();
@@ -113,21 +126,12 @@ function renderHome() {
   const cardioCount = thisWeek.filter((w) => w.type === 'cardio').length;
   const last = ws[0];
   $view.innerHTML = h`
-    <div class="stat-tiles">
-      <div class="tile"><div class="v">${thisWeek.length}</div><div class="k">本週訓練</div></div>
-      <div class="tile"><div class="v">${strengthCount}</div><div class="k">重訓</div></div>
-      <div class="tile"><div class="v">${cardioCount}</div><div class="k">有氧</div></div>
-    </div>
-    <div class="row mb">
-      <button class="btn primary big grow" id="go-strength">🏋️ 開始重訓</button>
-      <button class="btn big grow" id="go-cardio">🔥 開始有氧</button>
-    </div>
+    ${heroHTML(ws, thisWeek.length, strengthCount, cardioCount)}
     ${resumeCardHTML()}
-    ${reviewDue() ? `<div class="card review" id="rv-home"><div class="row"><div class="grow"><h3>📋 這週的回顧可以看了</h3><p class="muted small">訓練、體重、飲食一起看，下週要調整什麼。</p></div><button class="btn primary" id="rv-home-go">看回顧</button></div></div>` : ''}
-    <p class="muted small mb">下次重訓：三分化第 ${nextSplitDay(ws)} 天・${esc(SPLIT_DAYS[nextSplitDay(ws)].short)}（第 ${splitProgress(ws).round} 輪）</p>
+    ${reviewDue() ? `<div class="card review" id="rv-home"><div class="row"><div class="grow"><h3>這週的回顧可以看了</h3><p class="muted small">訓練、體重、飲食一起看，下週要調整什麼。</p></div><button class="btn primary" id="rv-home-go">看回顧</button></div></div>` : ''}
     ${deloadCardHTML()}
     <div class="card" id="go-body">${plan.missing ? `<h3>⚖️ 每日熱量與營養素</h3><p class="muted small">${plan.missing === 'profile' ? '到「體重」頁填個人資料並記錄體重，就會算出你的 TDEE 和三大營養素。' : '到「體重」頁記錄今天的體重，就會算出你的 TDEE 和三大營養素。'}</p>`
-      : `<div class="row"><div class="grow"><div class="muted small">今日目標（${esc(plan.goal.label)}${plan.dayType ? `・${plan.dayType === 'train' ? '練習日' : '休息日'}` : ''}）</div><div style="font-size:1.6rem;font-weight:800">${plan.target.toLocaleString()} kcal</div></div><div class="muted small" style="text-align:right">TDEE ${plan.tdee.toLocaleString()}<br>體重 ${plan.weight.kg} kg</div></div>
+      : `<div class="row"><div class="grow"><div class="muted small">今日目標（${esc(plan.goal.label)}${plan.dayType ? `・${plan.dayType === 'train' ? '練習日' : '休息日'}` : ''}）</div><div class="stat-num"><b>${plan.target.toLocaleString()}</b> kcal</div></div><div class="muted small" style="text-align:right">TDEE ${plan.tdee.toLocaleString()}<br>體重 ${plan.weight.kg} kg</div></div>
         <div class="macro-mini"><span>蛋白質 <b>${plan.macros.protein}g</b></span><span>脂肪 <b>${plan.macros.fat}g</b></span><span>碳水 <b>${plan.macros.carb}g</b></span></div>`}</div>
     ${store.mode === 'firebase' && !store.user ? `<div class="card accent"><h3>登入 Google 以同步紀錄</h3><p class="muted">登入後紀錄會存到 Firebase，換手機也在。</p><button class="btn primary block" id="login">使用 Google 登入</button></div>` : ''}
     <div class="card">
@@ -154,12 +158,22 @@ function renderHome() {
   });
   bindHistoryRows();
 }
+// ---- 週期、加強部位 ----
+function curCycle() { return cycleWeek(store.workouts, todayStr()); }
+function focusMuscles() { return trainPrefs(store.workouts).focus || []; }
+// 現在是不是減量週：手動開的減量週，或週期排到的減量週
+function deloadNow() { const c = curCycle(); return !!activeDeloadWeek(store.workouts, todayStr()) || (c && c.phase === 'deload'); }
+function cycleBarHTML(cw) { return `<div class="cy-bar">${CYCLE.map((x, i) => `<span class="cy-seg ${x.phase} ${cw && cw.index === i ? 'on' : ''}">${x.short}</span>`).join('')}</div>`; }
+function cycleTitle(cw) { return `${cw.label}${cw.phase === 'deload' ? '' : ` 第 ${cw.week} 週`}`; }
 // 減量週：停滯的動作 ≥ 3 個，或連續練了 8 週沒減量 → 首頁建議
 const DELOAD_SKIP_KEY = 'fitapp.deloadSkipUntil';
 function deloadSkipUntil() { try { return localStorage.getItem(DELOAD_SKIP_KEY) || ''; } catch { return ''; } }
 function deloadCardHTML() {
   const today = todayStr();
   const wk = activeDeloadWeek(store.workouts, today);
+  const cw = curCycle();
+  if (cw && !wk && route === 'home') return '';
+  if (cw && !wk) return `<div class="card cycle ${cw.phase === 'deload' ? 'deload' : ''}"><div class="row"><h3 class="grow">${cw.phase === 'deload' ? '🌙' : '📅'} ${esc(cycleTitle(cw))}</h3><span class="muted small">週期第 ${cw.round} 輪</span></div>${cycleBarHTML(cw)}<p class="muted small mt">這週：${esc(cw.note)}。菜單會自動照這個調整。</p></div>`;
   if (wk) return `<div class="card deload"><div class="row"><div class="grow"><h3>🌙 減量週（到 ${wk.end.slice(5).replace('-', '/')}）</h3><p class="muted small">這週每個動作重量約平常的 9 成、組數減半、每組留 3 下。下週回到原本的重量。</p></div></div><button class="btn ghost small" id="dl-end">提前結束減量週</button></div>`;
   const a = deloadAdvice(store.workouts, today);
   if (!a.need || deloadSkipUntil() >= today) return '';
@@ -315,12 +329,13 @@ function renderSplitDay() {
     <div class="presets mb">${[1, 2, 3].map((n) => `<button class="btn ${n === day ? 'active' : ''}" data-day="${n}">第 ${n} 天・${esc(SPLIT_DAYS[n].short)}</button>`).join('')}</div>
     <div class="card">
       <h3>今天的動作安排</h3>
-      ${activeDeloadWeek(store.workouts, todayStr()) ? '<div class="note-box deload mb">🌙 減量週：每個動作重量約 9 成、組數減半</div>' : ''}
+      ${(() => { const cw = curCycle(); return deloadNow() ? '<div class="note-box deload mb">🌙 減量週：每個動作重量約 9 成、組數減半</div>' : cw ? `<div class="note-box cycle mb">📅 ${esc(cycleTitle(cw))}：${esc(cw.note)}</div>` : ''; })()}
       ${splitSlots(day).map((slot) => {
         const cands = candidatesFor(slot, st.location);
         const name = slotDefault(slot, cands);
-        const adv = suggestNext(name, true, 'hypertrophy', store.workouts, repRange(slot.reps));
-        return `<div class="history-item"><div><div class="t">${esc(name)}</div><div class="d">${esc(slot.label)}・${slot.sets} 組 × ${esc(slot.reps)}・可替換 ${Math.max(0, cands.length - 1)} 個${adv && adv.deload ? '<br><span class="warn-text">🌙 停滯，今天這個動作減量</span>' : ''}</div></div></div>`;
+        const md = planMods({ baseSets: slot.sets, baseReps: slot.reps, baseRir: '', role: slot.role, partKey: slot.partPick || slot.part }, curCycle(), focusMuscles());
+        const adv = suggestNext(name, true, 'hypertrophy', store.workouts, repRange(md.reps));
+        return `<div class="history-item"><div><div class="t">${esc(name)}${md.focus ? ' <span class="pill accent">🎯 加強</span>' : ''}</div><div class="d">${esc(slot.label)}・${md.sets} 組 × ${esc(md.reps)}${md.sets !== slot.sets || md.reps !== slot.reps ? `<span class="muted">（原本 ${slot.sets} × ${esc(slot.reps)}）</span>` : ''}・可替換 ${Math.max(0, cands.length - 1)} 個${adv && adv.deload && !deloadNow() ? '<br><span class="warn-text">🌙 停滯，今天這個動作減量</span>' : ''}</div></div></div>`;
       }).join('')}
       <label class="row mt" style="gap:8px;align-items:center"><input type="checkbox" id="core" ${st.addCore ? 'checked' : ''}> 最後加練核心</label>
     </div>
@@ -432,10 +447,15 @@ function renderAIOptions() {
 // 依上次紀錄幫每個動作算今天的建議重量（博主菜單和 AI 菜單都套用）
 // 減量：減量週（全部動作）或這個動作停滯（單一動作）→ 重量 9 成、組數減半、每組留 3 下；動作頁可切回照常練
 function withSuggestions(menu) {
-  const week = activeDeloadWeek(store.workouts, todayStr());
+  const cw = curCycle(), focus = focusMuscles();
+  const week = deloadNow();
   menu.deloadWeek = !!week;
+  menu.cycle = cw ? { label: cycleTitle(cw), note: cw.note, phase: cw.phase } : null;
   menu.exercises.forEach((e) => {
-    e.sets = plannedSets(e);
+    // 週期、加強部位從「原本的計畫」算起，重算幾次都不會疊加
+    if (e.baseSets == null) { e.baseSets = plannedSets(e); e.baseReps = e.reps; e.baseRir = e.rir || ''; }
+    const md = planMods(e, menu.split ? cw : (cw && cw.phase === 'deload' ? cw : null), focus);
+    e.sets = md.sets; e.reps = md.reps; e.rir = md.rir; e.focus = md.focus;
     e.pro = tipsFor(e.name);
     const s = suggestNext(e.name, e.hasWeight, st.goal, store.workouts, menu.split ? repRange(e.reps) : null);
     const normal = s ? (s.normal || s) : null;
@@ -601,7 +621,8 @@ function renderExercisePage($p, m, i) {
   $p.innerHTML = `<div class="card ex-page">
     ${e.slotLabel ? `<div class="muted small">${esc(e.slotLabel)}${e.from ? `・${esc(e.from)}` : ''}</div>` : (m.creator ? `<div class="muted small">${esc(m.creator)}</div>` : '')}
     <h2 class="ex-title">${i + 1}. ${esc(e.name)}</h2>
-    <div class="ex-plan"><span>${e.sets} 組</span><span>× ${esc(e.reps)}</span><span>休 ${esc(e.rest)}</span>${e.rir ? `<span>保留 ${esc(e.rir)} 下</span>` : ''}</div>
+    <div class="ex-plan"><span>${e.sets} 組</span><span>× ${esc(e.reps)}</span><span>休 ${esc(e.rest)}</span>${e.rir ? `<span>保留 ${esc(e.rir)} 下</span>` : ''}${e.focus ? '<span class="focus">🎯 加強 +1 組</span>' : ''}</div>
+    ${m.cycle && !e.deload && i === 0 ? `<p class="muted small">📅 ${esc(m.cycle.label)}：${esc(m.cycle.note)}</p>` : ''}
     ${clip ? clipHTML(clip.url, clip.t, clip.label, clip.embed) : ''}
     ${e.suggest ? `<div class="note-box ${e.deload ? 'deload' : 'suggest'}">${e.deload ? '' : '📈 '}${esc(e.suggest)}</div>` : ''}
     ${e.deloadPlan ? `<button class="btn ghost small mt" id="dl-toggle">${e.deload ? '今天不減量，照常練' : '🌙 改回減量'}</button>` : ''}
@@ -635,7 +656,7 @@ function renderExercisePage($p, m, i) {
       saveInputs(m);
       const c = cands[Number(el.dataset.pick)];
       st.slotChoice[e.slot] = c.name;
-      m.exercises[i] = slotExercise(slot, c.name, cands, { sets: e.sets, reps: e.reps, rir: e.rir, why: '' });
+      m.exercises[i] = slotExercise(slot, c.name, cands, { sets: e.baseSets ?? e.sets, reps: e.baseReps ?? e.reps, rir: e.baseRir ?? e.rir, why: '' });
       withSuggestions({ ...m, exercises: [m.exercises[i]] });
       renderStrengthMenu();
     });
@@ -759,7 +780,7 @@ function renderIntervalTimer() {
     <div><span class="pill hot">${esc(CARDIO_MODES[cd.mode].label)}</span><span class="pill">${p.rounds} 輪</span><span class="pill">動 ${p.workSec}s</span><span class="pill">休 ${p.restSec}s</span><span class="pill">共 ${fmtClock(timer.totalSeconds)}</span></div>
     <div class="card mt">
       <div class="timer-wrap prep" id="tw">
-        <div class="ring"><svg viewBox="0 0 240 240" width="240" height="240"><circle cx="120" cy="120" r="${R}" stroke="#2a3040" stroke-width="10" fill="none"/><circle id="arc" cx="120" cy="120" r="${R}" stroke="currentColor" stroke-width="10" fill="none" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg>
+        <div class="ring"><svg viewBox="0 0 240 240" width="240" height="240"><circle cx="120" cy="120" r="${R}" stroke="#33373d" stroke-width="10" fill="none"/><circle id="arc" cx="120" cy="120" r="${R}" stroke="currentColor" stroke-width="10" fill="none" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg>
           <div class="inner"><div class="timer-phase" id="ph">準備</div><div class="timer-clock" id="clk">${p.prepSec}</div><div class="timer-round" id="rd">第 0 / ${p.rounds} 輪</div></div></div>
         <div id="mv" class="mt" style="font-size:1.1rem;font-weight:700"></div>
       </div>
@@ -867,9 +888,9 @@ function renderBody() {
     ${needProfile ? '' : plan.missing ? `<div class="card"><p class="muted">記錄第一筆體重後，就會算出每日熱量和三大營養素。</p></div>` : `
     <div class="card accent">
       <div class="row"><h3 class="grow">每日目標・${esc(plan.goal.label)}</h3><span class="pill hot">${plan.target.toLocaleString()} kcal</span></div>
-      ${bar('p', '蛋白質', plan.macros.protein, plan.pct.protein, '#4f8cff')}
-      ${bar('f', '脂肪', plan.macros.fat, plan.pct.fat, '#f5b942')}
-      ${bar('c', '碳水', plan.macros.carb, plan.pct.carb, '#3ccf8e')}
+      ${bar('p', '蛋白質', plan.macros.protein, plan.pct.protein, '#3b7be6')}
+      ${bar('f', '脂肪', plan.macros.fat, plan.pct.fat, '#f2c230')}
+      ${bar('c', '碳水', plan.macros.carb, plan.pct.carb, '#34b866')}
       <p class="muted small mt"><b>${esc(plan.goal.label)}比例</b>：蛋白質 ${plan.goal.ratio.p}%・脂肪 ${plan.goal.ratio.f}%・碳水 ${plan.goal.ratio.c}%。${esc(plan.goal.why)}</p>
       <p class="muted small">換算每公斤體重：蛋白質 ${plan.perKg.protein} g・脂肪 ${plan.perKg.fat} g・碳水 ${plan.perKg.carb} g（蛋白質限制在 ${plan.goal.pRange[0]}-${plan.goal.pRange[1]} g/kg、脂肪至少 0.6 g/kg，超出的部分由碳水補）</p>
       <div class="note-box">
@@ -887,7 +908,7 @@ function renderBody() {
         <p class="muted small">不要只看熱量差，要看身體的變化去調整飲食（譚成義）。每 1-2 週看一次趨勢，一次只調 20-30 g 碳水。</p></div>
     </div>`}
 
-    ${entries.length >= 2 ? `<div class="card"><h3>體重變化</h3><div class="chart-box">${lineChartSVG([{ name: '體重', color: '#4f8cff', points: entries.map((e) => ({ x: e.date, y: e.kg })) }])}</div></div>` : ''}
+    ${entries.length >= 2 ? `<div class="card"><h3>體重變化</h3><div class="chart-box">${lineChartSVG([{ name: '體重', color: '#3b7be6', points: entries.map((e) => ({ x: e.date, y: e.kg })) }])}</div></div>` : ''}
 
     <details class="card" ${needProfile ? 'open' : ''}>
       <summary><b>個人資料</b>${needProfile ? '<span class="pill hot">先填這裡</span>' : `<span class="muted small">・${prof.sex === 'male' ? '男' : '女'}・${prof.age} 歲・${prof.height} cm・${esc(GOALS_BODY[prof.goal || 'maintain'].label)}</span>`}</summary>
@@ -958,9 +979,9 @@ function renderDiet() {
       ${cy ? `<div class="presets dt-row mb">${[['train', '💪 練習日', cy.train.kcal], ['rest', '😴 休息日', cy.rest.kcal]].map(([k, l, kc]) => `<button class="btn ${plan.dayType === k ? 'active' : ''}" data-dt="${k}">${l}・${kc}</button>`).join('')}</div>` : ''}
       <div class="row"><h3 class="grow">${isToday ? `今天・${esc(plan.goal.label)}` : '這一天'}</h3><span class="pill hot">${e.kcal.toLocaleString()} / ${goal.target.toLocaleString()} kcal</span></div>
       <p class="small">${left >= 0 ? `還可以吃 <b>${left.toLocaleString()}</b> kcal` : `超過目標 <b>${(-left).toLocaleString()}</b> kcal`}</p>
-      ${bar('蛋白質 g', e.p, goal.macros.protein, '#4f8cff')}
-      ${bar('脂肪 g', e.f, goal.macros.fat, '#f5b942')}
-      ${bar('碳水 g', e.c, goal.macros.carb, '#3ccf8e')}
+      ${bar('蛋白質 g', e.p, goal.macros.protein, '#3b7be6')}
+      ${bar('脂肪 g', e.f, goal.macros.fat, '#f2c230')}
+      ${bar('碳水 g', e.c, goal.macros.carb, '#34b866')}
       ${isToday && rec?.note ? `<p class="small mt">${esc(rec.note)}</p>` : ''}
       ${isToday ? `<p class="muted small">已吃 / 目標。${cy ? `你每週練約 ${cy.n} 次：練習日多吃碳水、休息日少一點，一週總熱量和「體重」頁算的一樣。` : '目標在「體重」頁依體重和訓練頻率計算。'}</p>` : ''}
     </div>
@@ -1498,17 +1519,64 @@ async function runReview() {
   await store.add({ id: `review-${today}`, type: 'review', date: today, from: d.from, to: d.to, source, ...r });
   if (route === 'stats') renderStats();
 }
+// 各肌群每週組數長條圖（最近 12 週）
+let musSel = 'chest';
+function muscleTrendHTML() {
+  const { weeks, data } = weeklyMuscleSeries(store.workouts, todayStr(), 12);
+  if (!Object.values(data).some((arr) => arr.some((v) => v > 0))) return '';
+  const keys = ['chest', 'back', 'legs', 'shoulders', 'biceps', 'triceps'];
+  const vals = data[musSel], t = MUSCLE_TARGETS[musSel];
+  const W = 360, H = 170, pl = 26, pr = 6, pt = 10, pb = 22;
+  const yMax = Math.max(t ? t[1] + 4 : 10, ...vals) ;
+  const sy = (v) => pt + (H - pt - pb) * (1 - v / yMax);
+  const bw = (W - pl - pr) / vals.length;
+  let svg = '';
+  [0, Math.round(yMax / 2), Math.round(yMax)].forEach((v) => { svg += `<line x1="${pl}" x2="${W - pr}" y1="${sy(v)}" y2="${sy(v)}" stroke="#33373d"/><text x="${pl - 4}" y="${sy(v) + 4}" fill="#9a9ea5" font-size="10" text-anchor="end">${v}</text>`; });
+  if (t) svg += `<rect x="${pl}" width="${W - pl - pr}" y="${sy(t[1])}" height="${sy(t[0]) - sy(t[1])}" fill="rgba(60,207,142,.12)"/>`;
+  vals.forEach((v, i) => {
+    const x = pl + i * bw + bw * 0.18, w = bw * 0.64, cur = i === vals.length - 1;
+    const c = !t ? '#3b7be6' : v < t[0] ? '#f2c230' : v > t[1] ? '#e2383f' : '#34b866';
+    svg += `<rect x="${x.toFixed(1)}" y="${sy(v).toFixed(1)}" width="${w.toFixed(1)}" height="${(sy(0) - sy(v)).toFixed(1)}" rx="3" fill="${c}" opacity="${cur ? 0.45 : 1}"><title>${weeks[i].slice(5)} 那週：${v} 組</title></rect>`;
+    if (v) svg += `<text x="${(x + w / 2).toFixed(1)}" y="${(sy(v) - 3).toFixed(1)}" fill="#9a9ea5" font-size="9" text-anchor="middle">${v}</text>`;
+    if (i % 3 === 2 || cur) svg += `<text x="${(x + w / 2).toFixed(1)}" y="${H - 6}" fill="#9a9ea5" font-size="10" text-anchor="middle">${cur ? '本週' : weeks[i].slice(5).replace('-', '/')}</text>`;
+  });
+  const done = vals.slice(0, -1).filter((v) => v > 0);
+  const avg = done.length ? Math.round(done.reduce((a, b) => a + b, 0) / done.length * 10) / 10 : 0;
+  return `<div class="card"><h3>📈 各肌群每週組數（最近 12 週）</h3>
+    <div class="presets">${keys.map((k) => `<button class="btn small ${musSel === k ? 'active' : ''}" data-mus="${k}">${esc(PART_LABELS[k])}</button>`).join('')}</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="每週組數">${svg}</svg>
+    <p class="muted small">${t ? `綠色區塊是建議範圍 ${t[0]}-${t[1]} 組。` : ''}有練的週平均 ${avg} 組；本週還沒過完，顏色比較淡。週一到週日算一週。</p>
+  </div>`;
+}
+// 訓練週期卡（表現頁）
+function cycleCardHTML() {
+  const cw = curCycle();
+  const detail = `<ul class="cues small">${CYCLE.map((x) => `<li><b>${x.short}</b>・${esc(x.note)}</li>`).join('')}</ul>`;
+  if (!cw) return `<div class="card"><h3>📅 訓練週期</h3>
+    <p class="muted small">6 週一輪：累積期 3 週（組數慢慢加、越來越接近力竭）→ 強度期 2 週（主項次數降低、重量加上去）→ 減量週 1 週，然後重新開始。比一直用同樣的量練更不容易停滯。三分化的菜單會自動照週期調整。</p>
+    ${cycleBarHTML(null)}${detail}<button class="btn primary block mt" id="cy-start">從這週開始</button></div>`;
+  return `<div class="card"><div class="row"><h3 class="grow">📅 訓練週期</h3><span class="muted small">第 ${cw.round} 輪・這週從 ${cw.weekStart.slice(5).replace('-', '/')} 開始</span></div>
+    ${cycleBarHTML(cw)}<p class="small mt"><b>這週：${esc(cycleTitle(cw))}</b>・${esc(cw.note)}</p>
+    <details><summary class="muted small">每週在做什麼</summary>${detail}</details>
+    <button class="btn ghost small mt" id="cy-stop">停止週期</button></div>`;
+}
 function muscleCardHTML() {
   const rows = muscleReport(store.workouts, todayStr());
   if (!rows.some((x) => x.sets || x.avg4)) return '';
   const MAX = 24, pct = (n) => Math.min(100, (n / MAX) * 100);
   const word = { low: '不足', ok: '剛好', high: '偏多', none: '' };
+  const focus = focusMuscles();
+  // 最近 4 週練了 6 次以上才判斷「長期偏少」
+  const enough = store.workouts.filter((w) => w.type === 'strength' && w.date >= addDays(todayStr(), -27)).length >= 6;
+  const weak = enough ? rows.filter((x) => x.target && x.avg4 < x.target[0] && !focus.includes(x.key)) : [];
   return `<div class="card"><h3>💪 最近 7 天各肌群組數</h3>
     <p class="muted small">只算正式組（排除熱身組）。建議每週：胸、背、腿 10-20 組；肩、二頭、三頭 6-14 組。二頭、三頭會把背、胸的複合動作算一半。${muscleReport(store.workouts, todayStr()).length && (() => { const n = store.workouts.filter((w) => w.type === 'strength' && w.date >= addDays(todayStr(), -6)).length; return n < 3 ? `這 7 天只練了 ${n} 次，三分化還沒跑完一輪，數字會偏低。` : ''; })()}</p>
     ${rows.map((x) => `<div class="mus-row"><span class="mus-name">${esc(x.label)}</span>
       <div class="mus-bar">${x.target ? `<i class="zone" style="left:${pct(x.target[0])}%;width:${pct(x.target[1]) - pct(x.target[0])}%"></i>` : ''}<b class="${x.status}" style="width:${pct(x.sets)}%"></b></div>
-      <span class="mus-n ${x.status}">${x.sets} 組${word[x.status] ? `<small>${word[x.status]}</small>` : ''}</span></div>
-      <div class="mus-sub">${x.indirect ? `直接 ${x.direct} 組 + 複合動作 ${x.indirect} 組・` : ''}4 週平均每週 ${x.avg4} 組</div>`).join('')}
+      <span class="mus-n ${x.status}">${x.sets} 組${word[x.status] ? `<small>${word[x.status]}</small>` : ''}</span>
+      ${x.key !== 'core' ? `<button class="btn small mus-focus ${focus.includes(x.key) ? 'active' : ''}" data-focus="${x.key}" title="加強這個部位">🎯</button>` : '<span></span>'}</div>
+      <div class="mus-sub">${x.indirect ? `直接 ${x.direct} 組 + 複合動作 ${x.indirect} 組・` : ''}4 週平均每週 ${x.avg4} 組${focus.includes(x.key) ? '・<b class="focus">🎯 加強中：每個動作 +1 組</b>' : ''}</div>`).join('')}
+    ${weak.length ? `<p class="small mt warn-text">💡 ${weak.map((x) => `${esc(x.label)} 4 週平均 ${x.avg4} 組`).join('、')}，低於建議。按右邊的 🎯 設成加強部位，之後練到這個部位的動作都會多 1 組。</p>` : '<p class="muted small mt">按 🎯 可以把某個部位設成加強部位：練到這個部位的每個動作多 1 組。</p>'}
   </div>`;
 }
 function renderStats() {
@@ -1538,7 +1606,9 @@ function renderStats() {
       <div class="legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)} 最佳 ${best[series.indexOf(s)] || '-'}</span>`).join('')}</div>
       <p class="muted small mt">估算公式：Epley，1RM = 重量 × (1 + 次數 ÷ 30)。同一天多次取最高；減量的那幾次不算。</p>
     </div>
+    ${cycleCardHTML()}
     ${muscleCardHTML()}
+    ${muscleTrendHTML()}
     ${(() => { const a = deloadAdvice(store.workouts, todayStr()); return a.stalled.length ? `<div class="card deload"><h3>⚠️ 停滯中的動作</h3><p class="muted small">連續 3 次「最好的一組」和「總量」都沒超過之前。下次練到會自動減量一次，再回到原本重量。</p>${a.stalled.map((x) => `<div class="history-item"><div><div class="t">${esc(x.name)}</div><div class="d">上次突破 ${x.prDate}</div></div><div class="muted small">連續 ${x.since} 次</div></div>`).join('')}</div>` : ''; })()}
     <div class="card">
       <h3>各動作最佳估算 1RM</h3>
@@ -1550,6 +1620,16 @@ function renderStats() {
     </div>`;
   bindHistoryRows();
   q('#rv-gen') && (q('#rv-gen').onclick = () => runReview());
+  qa('[data-mus]').forEach((b) => b.onclick = () => { musSel = b.dataset.mus; renderStats(); });
+  qa('[data-focus]').forEach((b) => b.onclick = async () => {
+    const p = trainPrefs(store.workouts), k = b.dataset.focus;
+    const focus = (p.focus || []).includes(k) ? p.focus.filter((x) => x !== k) : [...(p.focus || []), k];
+    await store.add({ ...p, focus }, { keepCreatedAt: true });
+    toast(focus.includes(k) ? `🎯 ${PART_LABELS[k]}設為加強部位：每個動作 +1 組` : `已取消加強${PART_LABELS[k]}`);
+    if (route === 'stats') renderStats();
+  });
+  q('#cy-start') && (q('#cy-start').onclick = async () => { await store.add({ ...(cycleRecord(store.workouts) || {}), id: 'cycle', type: 'cycle', active: true, start: mondayOf(todayStr()) }, { keepCreatedAt: true }); toast('週期開始 📅 這週是累積期第 1 週'); if (route === 'stats') renderStats(); });
+  q('#cy-stop') && (q('#cy-stop').onclick = async () => { if (!confirm('停止訓練週期？菜單會回到原本的組數和次數。')) return; await store.add({ ...cycleRecord(store.workouts), active: false }, { keepCreatedAt: true }); toast('已停止週期'); if (route === 'stats') renderStats(); });
   if (autoReview) { autoReview = false; runReview(); }
 }
 
